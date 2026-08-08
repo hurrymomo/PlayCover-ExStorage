@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  playcover-externalSSD
+//  PlayCover ExStorage
 //
 
 import SwiftUI

@@ -7,7 +7,7 @@ import SwiftUI
 import Combine
 
 // MARK: - Storage Discovery (read-only, using diskutil -plist)
-struct DiskUtilDiscovery {
+nonisolated struct DiskUtilDiscovery {
     struct VolumeInfo {
         let name: String
         let filesystem: String
@@ -17,6 +17,10 @@ struct DiskUtilDiscovery {
         let isExternal: Bool
         let totalSizeBytes: Int64?
         let availableBytes: Int64?
+    }
+
+    private static func byteCount(_ value: Any?) -> Int64? {
+        (value as? NSNumber)?.int64Value
     }
 
     static func discoverExternalAPFSContainers() -> [ExternalAPFSContainer] {
@@ -29,6 +33,8 @@ struct DiskUtilDiscovery {
         for container in containers {
             guard let cref = container["ContainerReference"] as? String else { continue }
             guard let cuuidStr = container["APFSContainerUUID"] as? String, let cuuid = UUID(uuidString: cuuidStr) else { continue }
+            let capacityTotalBytes = byteCount(container["CapacityCeiling"])
+            let capacityFreeBytes = byteCount(container["CapacityFree"])
             // Only keep external containers based on ContainerReference's Internal flag
             var isExternal = false
             var mediaName: String? = nil
@@ -52,6 +58,7 @@ struct DiskUtilDiscovery {
                                                     bsdDevice: vi.bsdDevice,
                                                     totalSizeBytes: vi.totalSizeBytes,
                                                     availableBytes: vi.availableBytes,
+                                                    usedBytes: byteCount(v["CapacityInUse"]),
                                                     isSelectable: vi.isAPFS,
                                                     isExternal: true)
                         lock.lock()
@@ -61,7 +68,7 @@ struct DiskUtilDiscovery {
                 }
                 vols.sort { ($0.bsdDevice ?? $0.name) < ($1.bsdDevice ?? $1.name) }
             }
-            result.append(ExternalAPFSContainer(containerUUID: cuuid, containerReference: cref, displayName: mediaName, volumes: vols))
+            result.append(ExternalAPFSContainer(containerUUID: cuuid, containerReference: cref, displayName: mediaName, capacityTotalBytes: capacityTotalBytes, capacityFreeBytes: capacityFreeBytes, volumes: vols))
         }
         return result
     }
@@ -99,23 +106,27 @@ struct DiskUtilDiscovery {
 }
 
 // MARK: - Core Models
-struct ExternalAPFSContainer: Identifiable, Hashable {
+nonisolated struct ExternalAPFSContainer: Identifiable, Hashable {
     let containerUUID: UUID
     let containerReference: String
     let displayName: String?
+    let capacityTotalBytes: Int64?
+    let capacityFreeBytes: Int64?
     let volumes: [ExternalVolume]
 
     var id: UUID { containerUUID }
 
-    init(containerUUID: UUID, containerReference: String, displayName: String?, volumes: [ExternalVolume]) {
+    init(containerUUID: UUID, containerReference: String, displayName: String?, capacityTotalBytes: Int64?, capacityFreeBytes: Int64?, volumes: [ExternalVolume]) {
         self.containerUUID = containerUUID
         self.containerReference = containerReference
         self.displayName = displayName
+        self.capacityTotalBytes = capacityTotalBytes
+        self.capacityFreeBytes = capacityFreeBytes
         self.volumes = volumes
     }
 }
 
-struct ExternalVolume: Identifiable, Hashable {
+nonisolated struct ExternalVolume: Identifiable, Hashable {
     let name: String
     let filesystem: String
     let mountPoint: String?
@@ -123,12 +134,13 @@ struct ExternalVolume: Identifiable, Hashable {
     let bsdDevice: String?
     let totalSizeBytes: Int64?
     let availableBytes: Int64?
+    let usedBytes: Int64?
     let isSelectable: Bool
     let isExternal: Bool
 
     var id: String { bsdDevice ?? "\(name)-\(mountPoint ?? "unmounted")" }
 
-    init(name: String, filesystem: String, mountPoint: String?, isAPFS: Bool, bsdDevice: String?, totalSizeBytes: Int64?, availableBytes: Int64?, isSelectable: Bool, isExternal: Bool) {
+    init(name: String, filesystem: String, mountPoint: String?, isAPFS: Bool, bsdDevice: String?, totalSizeBytes: Int64?, availableBytes: Int64?, usedBytes: Int64?, isSelectable: Bool, isExternal: Bool) {
         self.name = name
         self.filesystem = filesystem
         self.mountPoint = mountPoint
@@ -136,6 +148,7 @@ struct ExternalVolume: Identifiable, Hashable {
         self.bsdDevice = bsdDevice
         self.totalSizeBytes = totalSizeBytes
         self.availableBytes = availableBytes
+        self.usedBytes = usedBytes
         self.isSelectable = isSelectable
         self.isExternal = isExternal
     }
@@ -149,6 +162,7 @@ struct ExternalVolume: Identifiable, Hashable {
             bsdDevice: bsdDevice,
             totalSizeBytes: totalSizeBytes,
             availableBytes: availableBytes,
+            usedBytes: usedBytes,
             isSelectable: isSelectable,
             isExternal: isExternal
         )
@@ -247,6 +261,8 @@ enum AppDialog: Identifiable {
     case confirmRestore
     case confirmDeleteBackup
     case migrationSucceeded
+    case migrationRolledBackForFullDiskAccess(error: String)
+    case reconnectFailedForFullDiskAccess(error: String)
     case message(title: String, message: String)
 
     var id: String {
@@ -254,6 +270,8 @@ enum AppDialog: Identifiable {
         case .confirmRestore: "confirmRestore"
         case .confirmDeleteBackup: "confirmDeleteBackup"
         case .migrationSucceeded: "migrationSucceeded"
+        case .migrationRolledBackForFullDiskAccess: "migrationRolledBackForFullDiskAccess"
+        case .reconnectFailedForFullDiskAccess: "reconnectFailedForFullDiskAccess"
         case let .message(title, message): "message-\(title)-\(message)"
         }
     }
@@ -264,6 +282,8 @@ struct MigrationReconnectChoice: Identifiable {
     let containerID: ExternalAPFSContainer.ID
     let diskName: String
     let volumeName: String
+    let device: String
+    let mountPoint: String?
 }
 
 // MARK: - View Models (UI-only scaffolding)
@@ -400,7 +420,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func validateMigrationInputs() -> Bool {
-        guard let bundleID = bundleIdentifier, let _ = applicationName else {
+        guard bundleIdentifier != nil, applicationName != nil else {
             operation = .failed
             operationMessage = "Drop a valid .app with a Bundle ID first."
             return false
@@ -428,13 +448,17 @@ final class AppViewModel: ObservableObject {
         }
 
         if let match = containers.lazy.compactMap({ container -> MigrationReconnectChoice? in
-            guard container.volumes.contains(where: {
-                $0.name == bundleID && connectionState(for: $0, bundleID: bundleID) == .disconnected
-            }) else { return nil }
+            guard let volume = container.volumes.first(where: {
+                $0.name == bundleID
+                    && $0.bsdDevice != nil
+                    && connectionState(for: $0, bundleID: bundleID) == .disconnected
+            }), let device = volume.bsdDevice else { return nil }
             return MigrationReconnectChoice(
                 containerID: container.id,
                 diskName: container.displayName ?? container.containerReference,
-                volumeName: bundleID
+                volumeName: bundleID,
+                device: device,
+                mountPoint: volume.mountPoint
             )
         }).first {
             migrationReconnectChoice = match
@@ -455,23 +479,27 @@ final class AppViewModel: ObservableObject {
         reconnectAppData()
     }
 
-    func startMigration() {
+    func startMigration(replacing existingVolume: MigrationReconnectChoice? = nil) {
         guard validateMigrationInputs(), let bundleID = bundleIdentifier,
               let selected = containers.first(where: { $0.id == selectedContainerID }) else { return }
 
         let dataPath = localDataPath(for: bundleID)
         let backupPath = dataPath.deletingLastPathComponent().appendingPathComponent("Data.backup", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: dataPath.path) else {
+        let dataExists = FileManager.default.fileExists(atPath: dataPath.path)
+        let backupExists = FileManager.default.fileExists(atPath: backupPath.path)
+        guard dataExists || (existingVolume != nil && backupExists) else {
             operation = .failed
             operationMessage = "No local Data directory exists for \(bundleID). Launch the app once, then try again."
             return
         }
-        guard !FileManager.default.fileExists(atPath: backupPath.path) else {
+        guard existingVolume != nil || !backupExists else {
             operation = .failed
             operationMessage = "Data.backup already exists. Restore or remove that backup before migrating again."
             return
         }
-        guard !selected.volumes.contains(where: { $0.name == bundleID }) else {
+        let selectedMatches = selected.volumes.filter { $0.name == bundleID }
+        guard selectedMatches.isEmpty
+                || (selectedMatches.count == 1 && selectedMatches.first?.bsdDevice == existingVolume?.device) else {
             operation = .failed
             operationMessage = "The selected SSD already contains a volume named \(bundleID). Reconnect it, or select a different SSD for a new migration."
             return
@@ -487,8 +515,39 @@ final class AppViewModel: ObservableObject {
             defer { self.refreshExternalVolumes() }
             var createdVolume: CreatedAPFSVolume?
             var localDataRenamed = false
+            var dataMountAttempted = false
+            var dataMountPreflightSucceeded = false
             do {
+                let logURL = try OperationLog.prepare(named: "migrate")
+                try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
                 try await self.runPrivileged { try $0.ensureHelperAvailable() }
+
+                if let existingVolume {
+                    self.operationMessage = "Removing the existing \(bundleID) volume before migration…"
+                    if let mountPoint = self.usableMountPoint(existingVolume.mountPoint) {
+                        try await self.runPrivileged {
+                            try $0.unmount(byMountPoint: URL(fileURLWithPath: mountPoint))
+                        }
+                    }
+                    try await self.runPrivileged {
+                        try $0.deleteAPFSVolume(byDevice: existingVolume.device)
+                    }
+                    self.removeVolume(device: existingVolume.device)
+
+                    if FileManager.default.fileExists(atPath: backupPath.path) {
+                        if self.isDirectoryEmptyOrMissing(dataPath) {
+                            if FileManager.default.fileExists(atPath: dataPath.path) {
+                                try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                            }
+                            try await self.runPrivileged {
+                                try $0.renameItem(from: backupPath, to: dataPath)
+                            }
+                        } else {
+                            try await self.runPrivileged { try $0.deleteItem(at: backupPath) }
+                        }
+                    }
+                }
+
                 self.migrationStagesCompleted.insert(.apfsContainerIdentified)
                 self.operationProgress = 0.12
                 self.operationMessage = "Creating a dedicated volume for \(bundleID)…"
@@ -504,24 +563,34 @@ final class AppViewModel: ObservableObject {
                 guard let volumeRoot = created.mountPoint else {
                     throw self.operationError("The new APFS volume did not provide a mount point.")
                 }
-                try await self.runPrivileged { try $0.copyItem(from: dataPath, to: volumeRoot) }
-                self.migrationStagesCompleted.insert(.dataCopied)
-                self.operationProgress = 0.48
-                self.operationMessage = "The data copy completed successfully. Preparing the mount point…"
-                self.migrationStagesCompleted.insert(.copyVerified)
-
                 try await self.runPrivileged { try $0.unmount(byMountPoint: volumeRoot) }
                 self.migrationStagesCompleted.insert(.temporaryUnmount)
-                self.operationProgress = 0.68
-                self.operationMessage = "Preserving the local data as Data.backup…"
+                self.operationProgress = 0.36
+                self.operationMessage = "Testing access to the app Data mount point before copying…"
 
                 try await self.runPrivileged { try $0.renameItem(from: dataPath, to: backupPath) }
                 localDataRenamed = true
                 self.migrationStagesCompleted.insert(.localBackupCreated)
-                self.operationProgress = 0.8
-                self.operationMessage = "Mounting the external volume at the app Data folder…"
-
                 self.migrationStagesCompleted.insert(.mountPointPrepared)
+                dataMountAttempted = true
+                try await self.runPrivileged {
+                    try $0.mountAPFS(byDevice: created.bsdDevice, at: dataPath, options: ["noowners"])
+                }
+                dataMountPreflightSucceeded = true
+                try await self.runPrivileged { try $0.unmount(byMountPoint: dataPath) }
+
+                self.operationProgress = 0.48
+                self.operationMessage = "Mount access verified. Copying app data to the external volume…"
+                try await self.runPrivileged {
+                    try $0.mountAPFS(byDevice: created.bsdDevice, at: volumeRoot, options: ["noowners"])
+                }
+                try await self.copyAsCurrentUser(from: backupPath, to: volumeRoot, logURL: logURL)
+                self.migrationStagesCompleted.insert(.dataCopied)
+                self.migrationStagesCompleted.insert(.copyVerified)
+
+                self.operationProgress = 0.8
+                self.operationMessage = "Data copy completed. Mounting the external volume at the app Data folder…"
+                try await self.runPrivileged { try $0.unmount(byMountPoint: volumeRoot) }
                 try await self.runPrivileged {
                     try $0.mountAPFS(byDevice: created.bsdDevice, at: dataPath, options: ["noowners"])
                 }
@@ -538,6 +607,7 @@ final class AppViewModel: ObservableObject {
                         bsdDevice: created.bsdDevice,
                         totalSizeBytes: nil,
                         availableBytes: nil,
+                        usedBytes: nil,
                         isSelectable: true,
                         isExternal: true
                     )
@@ -548,21 +618,51 @@ final class AppViewModel: ObservableObject {
                 self.operationMessage = "App data is now stored on and connected from the external APFS volume."
                 self.activeDialog = .migrationSucceeded
             } catch {
+                let migrationError = error
+                var rollbackSucceeded = true
                 if localDataRenamed {
                     try? await self.runPrivileged { try $0.unmount(byMountPoint: dataPath) }
+                    if let volumeRoot = createdVolume?.mountPoint {
+                        try? await self.runPrivileged { try $0.unmount(byMountPoint: volumeRoot) }
+                    }
                     if FileManager.default.fileExists(atPath: dataPath.path) {
-                        try? await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                        if self.isDirectoryEmptyOrMissing(dataPath) {
+                            do {
+                                try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                            } catch {
+                                rollbackSucceeded = false
+                            }
+                        } else {
+                            rollbackSucceeded = false
+                        }
                     }
                     if FileManager.default.fileExists(atPath: backupPath.path) {
-                        try? await self.runPrivileged { try $0.renameItem(from: backupPath, to: dataPath) }
+                        do {
+                            try await self.runPrivileged { try $0.renameItem(from: backupPath, to: dataPath) }
+                        } catch {
+                            rollbackSucceeded = false
+                        }
                     }
                 }
                 if let createdVolume {
-                    try? await self.runPrivileged { try $0.deleteAPFSVolume(byDevice: createdVolume.bsdDevice) }
+                    do {
+                        try await self.runPrivileged { try $0.deleteAPFSVolume(byDevice: createdVolume.bsdDevice) }
+                    } catch {
+                        rollbackSucceeded = false
+                    }
                 }
                 self.operation = .failed
                 self.operationProgress = nil
-                self.operationMessage = error.localizedDescription
+                if dataMountAttempted && !dataMountPreflightSucceeded && rollbackSucceeded {
+                    self.operationMessage = "Migration was rolled back and local app data was restored. Enable Full Disk Access, then try again."
+                    self.activeDialog = .migrationRolledBackForFullDiskAccess(
+                        error: migrationError.localizedDescription
+                    )
+                } else if !rollbackSucceeded {
+                    self.operationMessage = "Migration failed and rollback could not be fully verified. Do not retry until the migration log is reviewed. Original error: \(migrationError.localizedDescription)"
+                } else {
+                    self.operationMessage = migrationError.localizedDescription
+                }
             }
         }
     }
@@ -578,7 +678,10 @@ final class AppViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
+            var mountAttempted = false
             do {
+                let logURL = try OperationLog.prepare(named: "reconnect")
+                try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
                 let matches = selected.volumes.filter { $0.name == bundleID && $0.bsdDevice != nil }
                 guard matches.count <= 1 else {
                     throw NSError(domain: "Reconnect", code: 2, userInfo: [NSLocalizedDescriptionKey: "More than one volume named \(bundleID) exists on the selected SSD."])
@@ -601,6 +704,7 @@ final class AppViewModel: ObservableObject {
                 guard self.isSafeReconnectMountPoint(dataPath) else {
                     throw self.operationError("The local Data directory is not empty and no Data.backup exists. Reconnecting here could hide local data.")
                 }
+                mountAttempted = true
                 try await self.runPrivileged {
                     try $0.mountAPFS(byDevice: device, at: dataPath, options: ["noowners"])
                 }
@@ -609,7 +713,12 @@ final class AppViewModel: ObservableObject {
                 self.operationMessage = "\(bundleID) is connected to \(dataPath.path)."
             } catch {
                 self.operation = .failed
-                self.operationMessage = error.localizedDescription
+                if mountAttempted {
+                    self.operationMessage = "Reconnect could not mount the external volume. No local backup was modified. Enable Full Disk Access, then try again."
+                    self.activeDialog = .reconnectFailedForFullDiskAccess(error: error.localizedDescription)
+                } else {
+                    self.operationMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -629,8 +738,11 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
             do {
+                let logURL = try OperationLog.prepare(named: "restore")
+                try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
                 let dataPath = self.localDataPath(for: bundleID)
                 let backupPath = dataPath.deletingLastPathComponent().appendingPathComponent("Data.backup", isDirectory: true)
+                let recoveryPath = dataPath.deletingLastPathComponent().appendingPathComponent("Data.restore-in-progress", isDirectory: true)
                 let volume = try self.resolveVolume(for: bundleID)
                 var mountedPath = self.usableMountPoint(volume.mountPoint).map { URL(fileURLWithPath: $0) }
 
@@ -647,8 +759,23 @@ final class AppViewModel: ObservableObject {
                         }
                         mountedPath = dataPath
                     }
-                    try await self.runPrivileged {
-                        try $0.copyItem(from: mountedPath!, to: backupPath)
+                    if FileManager.default.fileExists(atPath: recoveryPath.path) {
+                        try await self.runPrivileged { try $0.deleteItem(at: recoveryPath) }
+                    }
+                    do {
+                        try await self.copyVolumeContentsAsCurrentUser(
+                            from: mountedPath!,
+                            to: recoveryPath,
+                            logURL: logURL
+                        )
+                        try await self.runPrivileged {
+                            try $0.renameItem(from: recoveryPath, to: backupPath)
+                        }
+                    } catch {
+                        if FileManager.default.fileExists(atPath: recoveryPath.path) {
+                            try? await self.runPrivileged { try $0.deleteItem(at: recoveryPath) }
+                        }
+                        throw error
                     }
                 }
 
@@ -693,9 +820,23 @@ final class AppViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
+                let logURL = try OperationLog.prepare(named: "remove")
+                try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
+                let backupSize = try? await Task.detached(priority: .utility) {
+                    try Self.allocatedSize(of: backupPath)
+                }.value
                 try await self.runPrivileged { try $0.deleteItem(at: backupPath) }
                 self.operation = .succeeded
-                self.operationMessage = "The local backup was deleted and its disk space was released."
+                let released = backupSize.map(StorageSizeFormatter.string)
+                self.operationMessage = released.map {
+                    "The local backup was deleted, releasing approximately \($0) of disk space."
+                } ?? "The local backup was deleted and its disk space was released."
+                self.activeDialog = .message(
+                    title: "Local Backup Deleted",
+                    message: released.map {
+                        "Data.backup was permanently deleted. Approximately \($0) of local disk space was released."
+                    } ?? "Data.backup was permanently deleted and its local disk space was released."
+                )
             } catch {
                 self.operation = .failed
                 self.operationMessage = error.localizedDescription
@@ -708,6 +849,31 @@ final class AppViewModel: ObservableObject {
             .appendingPathComponent("Library/Containers", isDirectory: true)
             .appendingPathComponent(bundleID, isDirectory: true)
             .appendingPathComponent("Data", isDirectory: true)
+    }
+
+    nonisolated private static func allocatedSize(of root: URL) throws -> Int64 {
+        let keys: Set<URLResourceKey> = [.fileAllocatedSizeKey, .isDirectoryKey]
+        let fileManager = FileManager.default
+        var enumerationError: Error?
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else {
+            throw NSError(domain: "BackupSize", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not inspect Data.backup."])
+        }
+
+        var total = Int64((try? root.resourceValues(forKeys: keys).fileAllocatedSize) ?? 0)
+        for case let item as URL in enumerator {
+            let allocated = try item.resourceValues(forKeys: keys).fileAllocatedSize ?? 0
+            total += Int64(allocated)
+        }
+        if let enumerationError { throw enumerationError }
+        return total
     }
 
     private func resolveVolume(for bundleID: String) throws -> (device: String, mountPoint: String?) {
@@ -729,6 +895,18 @@ final class AppViewModel: ObservableObject {
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated) {
             try operation(XPCPrivilegedClient.shared)
+        }.value
+    }
+
+    private func copyAsCurrentUser(from source: URL, to destination: URL, logURL: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try OperationLog.copyWithDitto(from: source, to: destination, logURL: logURL)
+        }.value
+    }
+
+    private func copyVolumeContentsAsCurrentUser(from source: URL, to destination: URL, logURL: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try OperationLog.copyVolumeContentsWithDitto(from: source, to: destination, logURL: logURL)
         }.value
     }
 
@@ -759,6 +937,8 @@ final class AppViewModel: ObservableObject {
                 containerUUID: container.containerUUID,
                 containerReference: container.containerReference,
                 displayName: container.displayName,
+                capacityTotalBytes: container.capacityTotalBytes,
+                capacityFreeBytes: container.capacityFreeBytes,
                 volumes: container.volumes.map {
                     $0.bsdDevice == device ? $0.replacingMountPoint(mountPoint) : $0
                 }
@@ -775,6 +955,8 @@ final class AppViewModel: ObservableObject {
                 containerUUID: container.containerUUID,
                 containerReference: container.containerReference,
                 displayName: container.displayName,
+                capacityTotalBytes: container.capacityTotalBytes,
+                capacityFreeBytes: container.capacityFreeBytes,
                 volumes: volumes
             )
         }
@@ -786,6 +968,8 @@ final class AppViewModel: ObservableObject {
                 containerUUID: container.containerUUID,
                 containerReference: container.containerReference,
                 displayName: container.displayName,
+                capacityTotalBytes: container.capacityTotalBytes,
+                capacityFreeBytes: container.capacityFreeBytes,
                 volumes: container.volumes.filter { $0.bsdDevice != device }
             )
         }
@@ -825,7 +1009,7 @@ struct ExternalDriveListView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(container.displayName ?? "External APFS Storage")
                                 .font(.headline.weight(isSelected(container) ? .semibold : .regular))
-                            Text("\(container.volumes.count) volume\(container.volumes.count == 1 ? "" : "s")")
+                            Text(containerSummary(container))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -885,6 +1069,14 @@ struct ExternalDriveListView: View {
     private func isSelected(_ container: ExternalAPFSContainer) -> Bool {
         viewModel.selectedContainerID == container.id
     }
+
+    private func containerSummary(_ container: ExternalAPFSContainer) -> String {
+        var summary = "\(container.volumes.count) volume\(container.volumes.count == 1 ? "" : "s")"
+        if let free = container.capacityFreeBytes {
+            summary += " • \(StorageSizeFormatter.string(free)) free"
+        }
+        return summary
+    }
 }
 
 struct VolumeSummaryRow: View {
@@ -927,7 +1119,7 @@ struct VolumeSummaryRow: View {
                             .background((connection.color ?? .secondary).opacity(0.12), in: Capsule())
                     }
                 }
-                Text(mountDescription)
+                Text(volumeDescription)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -941,6 +1133,22 @@ struct VolumeSummaryRow: View {
         }
         .padding(.vertical, 3)
         .help(usableMountPoint ?? "This volume is unmounted")
+    }
+
+    private var volumeDescription: String {
+        guard let used = volume.usedBytes else { return mountDescription }
+        return "\(mountDescription) • \(StorageSizeFormatter.string(used)) used"
+    }
+}
+
+private enum StorageSizeFormatter {
+    static func string(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        return formatter.string(fromByteCount: max(0, bytes))
     }
 }
 
@@ -1019,7 +1227,9 @@ struct MigrationProgressView: View {
                 Text(viewModel.operationMessage)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .help(viewModel.operationMessage)
 
                 if let progress = viewModel.operationProgress {
                     ProgressView(value: progress)
@@ -1171,6 +1381,24 @@ struct ContentView: View {
                     message: Text("App data was migrated to the external APFS volume. The local Data.backup is still available: remove it when you no longer need it, or restore it if the migrated app has problems."),
                     dismissButton: .default(Text("Done"))
                 )
+            case let .migrationRolledBackForFullDiskAccess(error):
+                Alert(
+                    title: Text("Migration Rolled Back"),
+                    message: Text("The external volume could not be mounted at the app Data folder. The new volume was removed and the original local Data directory was restored.\n\nThis may be caused by missing Full Disk Access. Enable PlayCover ExStorage in Privacy & Security, then reopen the app and try again.\n\nError: \(error)"),
+                    primaryButton: .default(Text("Open Settings & Quit")) {
+                        openFullDiskAccessSettingsAndQuit()
+                    },
+                    secondaryButton: .cancel(Text("Not Now"))
+                )
+            case let .reconnectFailedForFullDiskAccess(error):
+                Alert(
+                    title: Text("Reconnect Failed"),
+                    message: Text("The external volume could not be mounted at the app Data folder. No local backup was modified, and the external volume remains available.\n\nThis may be caused by missing Full Disk Access. Enable PlayCover ExStorage in Privacy & Security, then reopen the app and try again.\n\nError: \(error)"),
+                    primaryButton: .default(Text("Open Settings & Quit")) {
+                        openFullDiskAccessSettingsAndQuit()
+                    },
+                    secondaryButton: .cancel(Text("Not Now"))
+                )
             case let .message(title, message):
                 Alert(title: Text(title), message: Text(message), dismissButton: .default(Text("OK")))
             }
@@ -1181,13 +1409,15 @@ struct ContentView: View {
                     viewModel.reconnectFromMigrationChoice(choice)
                 }
             }
-            Button("Migrate Anyway") {
-                viewModel.startMigration()
+            Button("Replace & Migrate", role: .destructive) {
+                if let choice = viewModel.migrationReconnectChoice {
+                    viewModel.startMigration(replacing: choice)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             if let choice = viewModel.migrationReconnectChoice {
-                Text("A disconnected volume named \(choice.volumeName) already exists on \(choice.diskName). You can reconnect it instead of creating another volume.")
+                Text("A disconnected volume named \(choice.volumeName) already exists on \(choice.diskName). Reconnect it, or replace it by deleting the existing volume and starting a new migration.")
             }
         }
     }
@@ -1201,6 +1431,16 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    private func openFullDiskAccessSettingsAndQuit() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApplication.shared.terminate(nil)
+        }
     }
 }
 

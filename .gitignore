@@ -8,7 +8,9 @@ xcuserdata/
 
 # Build products
 build/
+dist/
 DerivedData/
+*.xcarchive
 *.dSYM
 *.dSYM.zip
 *.app

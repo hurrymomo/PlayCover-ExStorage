@@ -2,9 +2,9 @@ import Foundation
 import ServiceManagement
 import Security
 
-private let helperMachServiceName = "momo.PlayCover-ExStorage.PrivilegedHelper"
-private let helperPlistName = "momo.PlayCover-ExStorage.PrivilegedHelper.plist"
-private func signingTeamIdentifier() -> String? {
+nonisolated private let helperMachServiceName = "momo.PlayCover-ExStorage.PrivilegedHelper"
+nonisolated private let helperPlistName = "momo.PlayCover-ExStorage.PrivilegedHelper.plist"
+nonisolated private func signingTeamIdentifier() -> String? {
     guard let executableURL = Bundle.main.executableURL else { return nil }
     var code: SecStaticCode?
     guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess, let code else { return nil }
@@ -14,18 +14,18 @@ private func signingTeamIdentifier() -> String? {
     return values[kSecCodeInfoTeamIdentifier as String] as? String
 }
 
-@objc private protocol PrivilegedHelperXPCProtocol {
+@objc nonisolated private protocol PrivilegedHelperXPCProtocol {
+    func beginOperationLog(atPath: String, reply: @escaping (String?, NSError?) -> Void)
     func createAPFSVolume(containerReference: String, name: String, reply: @escaping (String?, String?, String?, NSError?) -> Void)
     func deleteAPFSVolume(device: String, reply: @escaping (String?, NSError?) -> Void)
     func mountAPFSVolume(device: String, atPath: String, options: [String], reply: @escaping (String?, NSError?) -> Void)
     func unmountVolume(atPath: String, reply: @escaping (String?, NSError?) -> Void)
     func renameItem(fromPath: String, toPath: String, reply: @escaping (String?, NSError?) -> Void)
-    func copyItem(fromPath: String, toPath: String, reply: @escaping (String?, NSError?) -> Void)
     func deleteItem(atPath: String, reply: @escaping (String?, NSError?) -> Void)
     func shutdown(reply: @escaping (String?, NSError?) -> Void)
 }
 
-private final class StandardReplyBox: @unchecked Sendable {
+nonisolated private final class StandardReplyBox: @unchecked Sendable {
     private var storedValue: (String?, NSError?)?
 
     func store(_ value: (String?, NSError?)) {
@@ -37,7 +37,7 @@ private final class StandardReplyBox: @unchecked Sendable {
     }
 }
 
-private final class CreateVolumeReplyBox: @unchecked Sendable {
+nonisolated private final class CreateVolumeReplyBox: @unchecked Sendable {
     private var storedValue: (String?, String?, String?, NSError?)?
 
     func store(_ value: (String?, String?, String?, NSError?)) {
@@ -49,7 +49,7 @@ private final class CreateVolumeReplyBox: @unchecked Sendable {
     }
 }
 
-final class XPCPrivilegedClient: @unchecked Sendable {
+nonisolated final class XPCPrivilegedClient: @unchecked Sendable {
     static let shared = XPCPrivilegedClient()
 
     private let service = SMAppService.daemon(plistName: helperPlistName)
@@ -65,6 +65,15 @@ final class XPCPrivilegedClient: @unchecked Sendable {
     }
 
     func ensureHelperAvailable() throws {
+        do {
+            try ensureHelperRegistered()
+        } catch {
+            printHelperError(error, context: "registration")
+            throw error
+        }
+    }
+
+    private func ensureHelperRegistered() throws {
         switch service.status {
         case .enabled:
             return
@@ -102,6 +111,13 @@ final class XPCPrivilegedClient: @unchecked Sendable {
         NSError(domain: "PrivilegedHelper", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
+    private func printHelperError(_ error: Error, context: String? = nil) {
+        let nsError = error as NSError
+        let heading = context.map { "[PrivilegedHelper] ERROR (\($0))" }
+            ?? "[PrivilegedHelper] ERROR"
+        print("\(heading)\nDomain: \(nsError.domain)\nCode: \(nsError.code)\n\(nsError.localizedDescription)")
+    }
+
     private func proxy() throws -> PrivilegedHelperXPCProtocol {
         try ensureHelperAvailable()
 
@@ -118,8 +134,8 @@ final class XPCPrivilegedClient: @unchecked Sendable {
             connection = newConnection
         }
 
-        let proxy = connection!.remoteObjectProxyWithErrorHandler { error in
-            print("[PrivilegedHelper] XPC error: \(error.localizedDescription)")
+        let proxy = connection!.remoteObjectProxyWithErrorHandler { [weak self] error in
+            self?.printHelperError(error, context: "XPC")
         }
         guard let typedProxy = proxy as? PrivilegedHelperXPCProtocol else {
             throw helperError("Unable to create the privileged helper XPC proxy.")
@@ -140,13 +156,26 @@ final class XPCPrivilegedClient: @unchecked Sendable {
         guard semaphore.wait(timeout: .now() + timeout) == .success else {
             connection?.invalidate()
             connection = nil
-            throw helperError("Timed out waiting for the privileged helper.", code: 2)
+            let error = helperError("Timed out waiting for the privileged helper.", code: 2)
+            printHelperError(error, context: "timeout")
+            throw error
         }
         guard let (message, error) = box.load() else {
-            throw helperError("The privileged helper returned no reply.", code: 3)
+            let error = helperError("The privileged helper returned no reply.", code: 3)
+            printHelperError(error, context: "missing reply")
+            throw error
         }
-        if let error { throw error }
+        if let error {
+            printHelperError(error)
+            throw error
+        }
         if let message { print("[PrivilegedHelper]\n\(message)") }
+    }
+
+    func beginOperationLog(at url: URL) throws {
+        try waitForReply { proxy, finish in
+            proxy.beginOperationLog(atPath: url.path, reply: finish)
+        }
     }
 
     func createAPFSVolume(containerRef: String, name: String) throws -> CreatedAPFSVolume {
@@ -158,11 +187,18 @@ final class XPCPrivilegedClient: @unchecked Sendable {
         }
         guard semaphore.wait(timeout: .now() + 120) == .success,
               let (device, mountPath, message, error) = box.load() else {
-            throw helperError("Timed out waiting for create-volume.", code: 2)
+            let error = helperError("Timed out waiting for create-volume.", code: 2)
+            printHelperError(error, context: "createAPFSVolume")
+            throw error
         }
-        if let error { throw error }
+        if let error {
+            printHelperError(error, context: "createAPFSVolume")
+            throw error
+        }
         guard let device, let mountPath else {
-            throw helperError("The helper returned an invalid create-volume result.", code: 3)
+            let error = helperError("The helper returned an invalid create-volume result.", code: 3)
+            printHelperError(error, context: "createAPFSVolume")
+            throw error
         }
         if let message { print("[PrivilegedHelper]\n\(message)") }
         return CreatedAPFSVolume(bsdDevice: device, mountPoint: URL(fileURLWithPath: mountPath))
@@ -192,12 +228,6 @@ final class XPCPrivilegedClient: @unchecked Sendable {
         }
     }
 
-    func copyItem(from source: URL, to destination: URL) throws {
-        try waitForReply(timeout: 24 * 60 * 60) { proxy, finish in
-            proxy.copyItem(fromPath: source.path, toPath: destination.path, reply: finish)
-        }
-    }
-
     func deleteItem(at url: URL) throws {
         try waitForReply { proxy, finish in
             proxy.deleteItem(atPath: url.path, reply: finish)
@@ -215,12 +245,157 @@ final class XPCPrivilegedClient: @unchecked Sendable {
         if let typedProxy = proxy as? PrivilegedHelperXPCProtocol {
             typedProxy.shutdown { message, error in
                 if let message { print("[PrivilegedHelper]\n\(message)") }
-                if let error { print("[PrivilegedHelper] shutdown error: \(error.localizedDescription)") }
+                if let error { self.printHelperError(error, context: "shutdown") }
                 semaphore.signal()
             }
             _ = semaphore.wait(timeout: .now() + 2)
         }
         connection.invalidate()
         self.connection = nil
+    }
+}
+
+enum OperationLog {
+    private static let allowedNames = Set(["migrate", "reconnect", "restore", "remove"])
+
+    static func prepare(named name: String) throws -> URL {
+        guard allowedNames.contains(name) else {
+            throw NSError(domain: "OperationLog", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid operation log name."])
+        }
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/PlayCover ExStorage", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(name).log")
+        let formatter = ISO8601DateFormatter()
+        let header = "PlayCover ExStorage \(name) log\nStarted: \(formatter.string(from: Date()))\n\n"
+        try Data(header.utf8).write(to: url, options: .atomic)
+        return url
+    }
+
+    nonisolated static func copyWithDitto(from source: URL, to destination: URL, logURL: URL) throws {
+        let executable = "/usr/bin/ditto"
+        let arguments = ["--rsrc", "--extattr", source.path, destination.path]
+        append("EXEC \(([executable] + arguments).map(shellQuoted).joined(separator: " "))", to: logURL)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+
+        do {
+            try process.run()
+        } catch {
+            append("LAUNCH ERROR \(error.localizedDescription)", to: logURL)
+            throw error
+        }
+
+        let readers = DispatchGroup()
+        let stdoutCapture = UserCommandPipeCapture()
+        let stderrCapture = UserCommandPipeCapture()
+        readers.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            stdoutCapture.store(output.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        readers.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            stderrCapture.store(error.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        process.waitUntilExit()
+        readers.wait()
+
+        let stdout = String(data: stdoutCapture.load(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrCapture.load(), encoding: .utf8) ?? ""
+        append("EXIT \(process.terminationStatus)", to: logURL)
+        appendOutput("STDOUT", stdout, to: logURL)
+        appendOutput("STDERR", stderr, to: logURL)
+
+        guard process.terminationStatus == 0 else {
+            let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let error = NSError(
+                domain: "PlayCoverExStorage.Ditto",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: message.isEmpty
+                    ? "ditto failed with status \(process.terminationStatus)."
+                    : message]
+            )
+            print("[AppCommand] ERROR (ditto)\nDomain: \(error.domain)\nCode: \(error.code)\n\(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    nonisolated static func copyVolumeContentsWithDitto(from source: URL, to destination: URL, logURL: URL) throws {
+        let excludedRootItems: Set<String> = [
+            ".TemporaryItems", ".Spotlight-V100", ".fseventsd", ".Trashes", ".DocumentRevisions-V100"
+        ]
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+        let items = try fileManager.contentsOfDirectory(
+            at: source,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            if excludedRootItems.contains(item.lastPathComponent) {
+                append("SKIP volume metadata \(item.path)", to: logURL)
+                continue
+            }
+            try copyWithDitto(
+                from: item,
+                to: destination.appendingPathComponent(item.lastPathComponent),
+                logURL: logURL
+            )
+        }
+    }
+
+    nonisolated private static func appendOutput(_ label: String, _ value: String, to url: URL) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let limit = 32_000
+        let content = trimmed.count > limit
+            ? String(trimmed.prefix(limit)) + "\n… output truncated in log …"
+            : trimmed
+        append("\(label):\n\(content)", to: url)
+    }
+
+    nonisolated private static func append(_ message: String, to url: URL) {
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data("[\(timestamp)] \(message)\n".utf8))
+        } catch {
+            return
+        }
+    }
+
+    nonisolated private static func shellQuoted(_ value: String) -> String {
+        if value.range(of: #"^[A-Za-z0-9_./:-]+$"#, options: .regularExpression) != nil {
+            return value
+        }
+        return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+}
+
+nonisolated private final class UserCommandPipeCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func store(_ newData: Data) {
+        lock.lock()
+        data = newData
+        lock.unlock()
+    }
+
+    func load() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
     }
 }

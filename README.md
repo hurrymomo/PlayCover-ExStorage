@@ -13,6 +13,18 @@ PlayCover ExStorage is a macOS utility that moves a PlayCover app's container da
 
 The app only lists external APFS containers. Internal disks and non-APFS filesystems are rejected by the privileged helper.
 
+## Downloading the test build
+
+GitHub Releases provides a universal macOS build for both Apple Silicon and Intel Macs. The free test build is signed with an Apple Development certificate but is not notarized by Apple.
+
+1. Download the `.dmg` from GitHub Releases.
+2. Drag **PlayCover ExStorage** into **Applications**.
+3. Try to open the app once. If macOS blocks it, open **System Settings → Privacy & Security** and choose **Open Anyway**.
+4. Approve PlayCover ExStorage under **System Settings → General → Login Items** when requested.
+5. Grant Full Disk Access if macOS prevents mounting a volume at an app container's `Data` directory.
+
+Only install a build downloaded from this repository. The app performs privileged disk operations, so keep a separate backup of important data.
+
 ## Features
 
 - **Migrate App Data** creates a dedicated APFS volume named after the selected app's Bundle ID, copies the app's local `Data`, preserves it as `Data.backup`, and mounts the new volume at the original `Data` path.
@@ -25,6 +37,19 @@ The drive list uses these states:
 - Green: the matching volume is mounted at the selected app's `Data` directory.
 - Yellow: a matching volume exists but is disconnected or mounted elsewhere.
 - Gray: no volume matches the selected app.
+
+## Operation logs
+
+Each operation replaces its previous log and records Helper calls, command arguments, exit status, and command output:
+
+```text
+~/Library/Logs/PlayCover ExStorage/migrate.log
+~/Library/Logs/PlayCover ExStorage/reconnect.log
+~/Library/Logs/PlayCover ExStorage/restore.log
+~/Library/Logs/PlayCover ExStorage/remove.log
+```
+
+Long status messages are shortened in the app UI; use the corresponding log for full command diagnostics.
 
 ## Data layout
 
@@ -60,9 +85,9 @@ The app uses `SMAppService` and an XPC LaunchDaemon on macOS 13+. The main app d
 
 - Creating and deleting external APFS volumes
 - Mounting and unmounting external APFS volumes
-- Copying, renaming, and deleting the selected app's `Data` or `Data.backup`
+- Renaming and deleting the selected app's `Data` or `Data.backup`
 
-The Helper runs as root, so it does not invoke `sudo`. It validates device identifiers, rejects internal/non-APFS disks, and restricts filesystem paths to supported app-container and external-volume locations.
+The Helper runs as root, so it does not invoke `sudo`. It validates device identifiers, rejects internal/non-APFS disks, and restricts filesystem paths to supported app-container and external-volume locations. Data copies run in the main app as the signed-in user rather than in the root Helper.
 
 ## Safe workflow
 
@@ -79,6 +104,8 @@ Do not disconnect the external drive during migration, restore, or backup deleti
 ## Creating a distributable build
 
 For public distribution, archive the app with a Developer ID Application certificate, notarize it with Apple, staple the notarization ticket, and distribute the signed app as a `.dmg` or `.zip` through GitHub Releases. Build products and signing credentials should not be committed to the source repository.
+
+The GitHub test build is intentionally marked `unnotarized`. It uses an Apple Development signature so the main app and privileged Helper can authenticate each other, but users must approve it manually in macOS security settings.
 
 ## License
 

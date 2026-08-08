@@ -1,0 +1,15 @@
+PlayCover ExStorage 1.0 — Unnotarized Test Build
+
+This build is signed with an Apple Development certificate but is not notarized by Apple.
+
+Installation
+1. Drag PlayCover ExStorage.app to the Applications shortcut in this window.
+2. Open the app from Applications.
+3. If macOS blocks it, open System Settings > Privacy & Security and choose Open Anyway.
+4. When requested, approve PlayCover ExStorage under System Settings > General > Login Items.
+5. Full Disk Access may also be required for mounting at an app container's Data directory.
+
+Only download this build from the official GitHub repository:
+https://github.com/hurrymomo/PlayCover-ExStorage
+
+This app performs privileged disk and filesystem operations. Keep a separate backup of important data.

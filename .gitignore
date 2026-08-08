@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Build products
+build/
+DerivedData/
+*.dSYM
+*.dSYM.zip
+*.app
+*.dmg
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Local signing and secrets
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.key

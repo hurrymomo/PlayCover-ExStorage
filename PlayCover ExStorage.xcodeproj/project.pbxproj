@@ -6,8 +6,49 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		CD1000013027000000000001 /* LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist in Copy LaunchDaemons */ = {isa = PBXBuildFile; fileRef = CD1000023027000000000002 /* LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist */; };
+		FA7096D63026CD7700B3B303 /* PrivilegedHelper in Embed Helper Tools */ = {isa = PBXBuildFile; fileRef = FA7096CB3026BBB900B3B303 /* PrivilegedHelper */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		CD1000033027000000000003 /* Copy LaunchDaemons */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Library/LaunchDaemons;
+			dstSubfolderSpec = 1;
+			files = (
+				CD1000013027000000000001 /* LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist in Copy LaunchDaemons */,
+			);
+			name = "Copy LaunchDaemons";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FA7096C93026BBB900B3B303 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = /usr/share/man/man1/;
+			dstSubfolderSpec = 0;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+		};
+		FA7096D53026CCF000B3B303 /* Embed Helper Tools */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				FA7096D63026CD7700B3B303 /* PrivilegedHelper in Embed Helper Tools */,
+			);
+			name = "Embed Helper Tools";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		CD1000023027000000000002 /* LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist"; sourceTree = "<group>"; };
 		FA7096B33026AEA000B3B303 /* PlayCover ExStorage.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PlayCover ExStorage.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA7096CB3026BBB900B3B303 /* PrivilegedHelper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = PrivilegedHelper; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +57,22 @@
 			path = "PlayCover ExStorage";
 			sourceTree = "<group>";
 		};
+		FA7096CC3026BBBA00B3B303 /* PrivilegedHelper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PrivilegedHelper;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		FA7096B03026AEA000B3B303 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FA7096C83026BBB900B3B303 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +86,8 @@
 			isa = PBXGroup;
 			children = (
 				FA7096B53026AEA000B3B303 /* PlayCover ExStorage */,
+				FA7096CC3026BBBA00B3B303 /* PrivilegedHelper */,
+				CD1000023027000000000002 /* LaunchDaemons/momo.PlayCover-ExStorage.PrivilegedHelper.plist */,
 				FA7096B43026AEA000B3B303 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +96,7 @@
 			isa = PBXGroup;
 			children = (
 				FA7096B33026AEA000B3B303 /* PlayCover ExStorage.app */,
+				FA7096CB3026BBB900B3B303 /* PrivilegedHelper */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -55,6 +111,8 @@
 				FA7096AF3026AEA000B3B303 /* Sources */,
 				FA7096B03026AEA000B3B303 /* Frameworks */,
 				FA7096B13026AEA000B3B303 /* Resources */,
+				FA7096D53026CCF000B3B303 /* Embed Helper Tools */,
+				CD1000033027000000000003 /* Copy LaunchDaemons */,
 			);
 			buildRules = (
 			);
@@ -70,6 +128,28 @@
 			productReference = FA7096B33026AEA000B3B303 /* PlayCover ExStorage.app */;
 			productType = "com.apple.product-type.application";
 		};
+		FA7096CA3026BBB900B3B303 /* PrivilegedHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FA7096CF3026BBBA00B3B303 /* Build configuration list for PBXNativeTarget "PrivilegedHelper" */;
+			buildPhases = (
+				FA7096C73026BBB900B3B303 /* Sources */,
+				FA7096C83026BBB900B3B303 /* Frameworks */,
+				FA7096C93026BBB900B3B303 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				FA7096CC3026BBBA00B3B303 /* PrivilegedHelper */,
+			);
+			name = PrivilegedHelper;
+			packageProductDependencies = (
+			);
+			productName = PrivilegedHelper;
+			productReference = FA7096CB3026BBB900B3B303 /* PrivilegedHelper */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -81,6 +161,9 @@
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					FA7096B23026AEA000B3B303 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					FA7096CA3026BBB900B3B303 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
@@ -100,6 +183,7 @@
 			projectRoot = "";
 			targets = (
 				FA7096B23026AEA000B3B303 /* PlayCover ExStorage */,
+				FA7096CA3026BBB900B3B303 /* PrivilegedHelper */,
 			);
 		};
 /* End PBXProject section */
@@ -116,6 +200,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		FA7096AF3026AEA000B3B303 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FA7096C73026BBB900B3B303 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -160,10 +251,10 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 37DLHHL69C;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -179,7 +270,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -224,10 +315,10 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 37DLHHL69C;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -237,7 +328,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -253,8 +344,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 37DLHHL69C;
-				ENABLE_APP_SANDBOX = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -285,8 +376,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 37DLHHL69C;
-				ENABLE_APP_SANDBOX = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -309,6 +400,40 @@
 			};
 			name = Release;
 		};
+		FA7096D03026BBBA00B3B303 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "momo.PlayCover-ExStorage.PrivilegedHelper";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		FA7096D13026BBBA00B3B303 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "momo.PlayCover-ExStorage.PrivilegedHelper";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -326,6 +451,15 @@
 			buildConfigurations = (
 				FA7096BF3026AEA000B3B303 /* Debug */,
 				FA7096C03026AEA000B3B303 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FA7096CF3026BBBA00B3B303 /* Build configuration list for PBXNativeTarget "PrivilegedHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FA7096D03026BBBA00B3B303 /* Debug */,
+				FA7096D13026BBBA00B3B303 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

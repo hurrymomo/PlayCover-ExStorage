@@ -679,6 +679,7 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
             var mountAttempted = false
+            var localDataWillBeHidden = false
             do {
                 let logURL = try OperationLog.prepare(named: "reconnect")
                 try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
@@ -701,8 +702,9 @@ final class AppViewModel: ObservableObject {
                         try $0.unmount(byMountPoint: URL(fileURLWithPath: currentMount))
                     }
                 }
-                guard self.isSafeReconnectMountPoint(dataPath) else {
-                    throw self.operationError("The local Data directory is not empty and no Data.backup exists. Reconnecting here could hide local data.")
+                localDataWillBeHidden = !self.isDirectoryEmptyOrMissing(dataPath)
+                if localDataWillBeHidden {
+                    self.operationMessage = "The local Data directory is not empty. Reconnecting will temporarily hide its contents without deleting them…"
                 }
                 mountAttempted = true
                 try await self.runPrivileged {
@@ -710,7 +712,15 @@ final class AppViewModel: ObservableObject {
                 }
                 self.updateMountPoint(for: device, to: dataPath.path)
                 self.operation = .succeeded
-                self.operationMessage = "\(bundleID) is connected to \(dataPath.path)."
+                self.operationMessage = localDataWillBeHidden
+                    ? "\(bundleID) is connected. Existing local Data is temporarily hidden and was not deleted."
+                    : "\(bundleID) is connected to \(dataPath.path)."
+                if localDataWillBeHidden {
+                    self.activeDialog = .message(
+                        title: "Local Data Temporarily Hidden",
+                        message: "The external volume is connected successfully. The existing local Data directory was not deleted, but its contents are hidden while the external volume is mounted. They will become visible again after the volume is unmounted."
+                    )
+                }
             } catch {
                 self.operation = .failed
                 if mountAttempted {
@@ -920,11 +930,6 @@ final class AppViewModel: ObservableObject {
     private func isDirectoryEmptyOrMissing(_ url: URL) -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return true }
         return (try? FileManager.default.contentsOfDirectory(atPath: url.path).isEmpty) ?? false
-    }
-
-    private func isSafeReconnectMountPoint(_ dataPath: URL) -> Bool {
-        let backupPath = dataPath.deletingLastPathComponent().appendingPathComponent("Data.backup", isDirectory: true)
-        return FileManager.default.fileExists(atPath: backupPath.path) || isDirectoryEmptyOrMissing(dataPath)
     }
 
     private func operationError(_ message: String) -> NSError {

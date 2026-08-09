@@ -13,6 +13,12 @@ PlayCover ExStorage is a macOS utility that moves a PlayCover app's container da
 
 The app only lists external APFS containers. Internal disks and non-APFS filesystems are rejected by the privileged helper.
 
+## What's new in 1.0.1
+
+- Reconnect can now mount a matching external volume even when the local `Data` directory contains files. The local files are not deleted; they remain safely hidden until the external volume is unmounted.
+- Reconnect now explains when existing local data is being temporarily hidden.
+- The app icon has been rebuilt with Icon Composer for native macOS rendering and consistent sizing.
+
 ## Downloading the test build
 
 GitHub Releases provides a universal macOS build for both Apple Silicon and Intel Macs. The free test build is signed with an Apple Development certificate but is not notarized by Apple.
@@ -28,7 +34,7 @@ Only install a build downloaded from this repository. The app performs privilege
 ## Features
 
 - **Migrate App Data** creates a dedicated APFS volume named after the selected app's Bundle ID, copies the app's local `Data`, preserves it as `Data.backup`, and mounts the new volume at the original `Data` path.
-- **Reconnect Volume** finds the matching Bundle ID volume on the selected external disk and mounts it back at the app's `Data` path after a drive has been disconnected and reattached.
+- **Reconnect Volume** finds the matching Bundle ID volume on the selected external disk and mounts it back at the app's `Data` path after a drive has been disconnected and reattached. If local `Data` already contains files, reconnect leaves them untouched and temporarily hides them beneath the mounted volume.
 - **Restore Local Data** copies data back when necessary, removes the migrated APFS volume, and restores a normal local `Data` directory.
 - **Remove Local Backup** permanently removes `Data.backup` after the migrated app has been verified to work.
 

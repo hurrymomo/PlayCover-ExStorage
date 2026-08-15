@@ -195,13 +195,16 @@ nonisolated final class XPCPrivilegedClient: @unchecked Sendable {
             printHelperError(error, context: "createAPFSVolume")
             throw error
         }
-        guard let device, let mountPath else {
+        guard let device else {
             let error = helperError("The helper returned an invalid create-volume result.", code: 3)
             printHelperError(error, context: "createAPFSVolume")
             throw error
         }
         if let message { print("[PrivilegedHelper]\n\(message)") }
-        return CreatedAPFSVolume(bsdDevice: device, mountPoint: URL(fileURLWithPath: mountPath))
+        return CreatedAPFSVolume(
+            bsdDevice: device,
+            mountPoint: mountPath.map { URL(fileURLWithPath: $0) }
+        )
     }
 
     func unmount(byMountPoint: URL) throws {
@@ -262,6 +265,10 @@ enum OperationLog {
         guard allowedNames.contains(name) else {
             throw NSError(domain: "OperationLog", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid operation log name."])
+        }
+        if name == "migrate" {
+            MigrationTrace.event("migration.command-log.attached", details: "path=\(MigrationTrace.logURL.path)")
+            return MigrationTrace.logURL
         }
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/PlayCover ExStorage", isDirectory: true)
@@ -330,26 +337,48 @@ enum OperationLog {
     }
 
     nonisolated static func copyVolumeContentsWithDitto(from source: URL, to destination: URL, logURL: URL) throws {
-        let excludedRootItems: Set<String> = [
-            ".TemporaryItems", ".Spotlight-V100", ".fseventsd", ".Trashes", ".DocumentRevisions-V100"
-        ]
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+        var destinationIsDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: destination.path, isDirectory: &destinationIsDirectory) {
+            guard destinationIsDirectory.boolValue else {
+                throw NSError(
+                    domain: "PlayCoverExStorage.Copy",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "The copy destination is not a directory: \(destination.path)"]
+                )
+            }
+        } else {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+        }
         let items = try fileManager.contentsOfDirectory(
             at: source,
             includingPropertiesForKeys: nil,
             options: []
         )
         for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            if excludedRootItems.contains(item.lastPathComponent) {
+            if VolumeMetadataPolicy.isExcludedRootItem(item) {
                 append("SKIP volume metadata \(item.path)", to: logURL)
                 continue
             }
-            try copyWithDitto(
-                from: item,
-                to: destination.appendingPathComponent(item.lastPathComponent),
-                logURL: logURL
-            )
+            let destinationItem = destination.appendingPathComponent(item.lastPathComponent)
+            let values = try item.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if values.isSymbolicLink == true {
+                let linkTarget = try fileManager.destinationOfSymbolicLink(atPath: item.path)
+                guard !fileManager.fileExists(atPath: destinationItem.path) else {
+                    throw NSError(
+                        domain: "PlayCoverExStorage.Ditto",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Refusing to replace an existing symbolic-link destination: \(destinationItem.path)"]
+                    )
+                }
+                append("SYMLINK \(destinationItem.path) -> \(linkTarget)", to: logURL)
+                try fileManager.createSymbolicLink(
+                    atPath: destinationItem.path,
+                    withDestinationPath: linkTarget
+                )
+            } else {
+                try copyWithDitto(from: item, to: destinationItem, logURL: logURL)
+            }
         }
     }
 

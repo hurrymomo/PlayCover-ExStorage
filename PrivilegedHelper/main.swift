@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Darwin
 
 private let helperMachServiceName = "momo.PlayCover-ExStorage.PrivilegedHelper"
 
@@ -27,7 +28,6 @@ private func authorizedAppRequirement() -> String? {
 
 private struct CommandResult {
     let output: String
-    let errorOutput: String
 }
 
 private final class PipeCapture: @unchecked Sendable {
@@ -62,11 +62,11 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
     private let containerPattern = try! NSRegularExpression(pattern: #"^disk[0-9]+$"#)
     private let bundleIDPattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$"#)
     private let containerPathPattern = try! NSRegularExpression(
-        pattern: #"^/Users/[^/]+/Library/Containers/[A-Za-z0-9][A-Za-z0-9.-]{0,254}/Data(?:\.backup|\.restore-in-progress)?$"#
+        pattern: #"^/Users/[^/]+/Library/Containers/[A-Za-z0-9][A-Za-z0-9.-]{0,254}/Data(?:\.backup|\.restore-in-progress|\.overwrite-backup)?$"#
     )
     private let volumePathPattern = try! NSRegularExpression(pattern: #"^/Volumes/[^/]+$"#)
     private let logPathPattern = try! NSRegularExpression(
-        pattern: #"^/Users/[^/]+/Library/Logs/PlayCover ExStorage/(?:migrate|reconnect|restore|remove)\.log$"#
+        pattern: #"^/Users/[^/]+/Library/Logs/PlayCover ExStorage/(?:workflow|migrate|reconnect|restore|remove)\.log$"#
     )
 
     func beginOperationLog(atPath: String, reply: @escaping (String?, NSError?) -> Void) {
@@ -101,7 +101,7 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             try requireExternalAPFSContainer(identifier: containerReference)
 
             let devicesBefore = try volumeDevices(in: containerReference)
-            _ = try run("/usr/sbin/diskutil", ["apfs", "addVolume", containerReference, "APFS", name])
+            _ = try run("/usr/sbin/diskutil", ["apfs", "addVolume", containerReference, "APFS", name, "-nomount"])
             let newDevices = try volumeDevices(in: containerReference).subtracting(devicesBefore)
             guard newDevices.count == 1, let device = newDevices.first else {
                 throw HelperFailure.error("The newly created APFS volume could not be identified safely.")
@@ -111,9 +111,8 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             guard (info["VolumeName"] as? String) == name else {
                 throw HelperFailure.error("The new APFS volume name could not be verified.")
             }
-            let mountPath = try mountedPath(for: device)
-            appendLog("SUCCESS Created APFS volume \(device) at \(mountPath).")
-            reply(device, mountPath, "Created APFS volume \(device).", nil)
+            appendLog("SUCCESS Created unmounted APFS volume \(device).")
+            reply(device, nil, "Created unmounted APFS volume \(device).", nil)
         } catch let error as NSError {
             appendLog("ERROR \(error.localizedDescription)")
             if let createdDevice {
@@ -145,7 +144,12 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
                 try self.fileManager.createDirectory(atPath: atPath, withIntermediateDirectories: false)
                 try self.copyParentOwnership(to: atPath)
             }
-            _ = try self.run("/usr/sbin/diskutil", ["mount", "-mountPoint", atPath, device])
+            var mountArguments = ["mount"]
+            if options.contains("nobrowse") {
+                mountArguments.append("nobrowse")
+            }
+            mountArguments.append(contentsOf: ["-mountPoint", atPath, device])
+            _ = try self.run("/usr/sbin/diskutil", mountArguments)
             if options.contains("noowners") {
                 _ = try self.run("/usr/sbin/diskutil", ["disableOwnership", device])
             }
@@ -183,7 +187,11 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
     func deleteItem(atPath: String, reply: @escaping (String?, NSError?) -> Void) {
         appendLog("CALL deleteItem(atPath: \(atPath))")
         perform(reply) {
-            try self.requireContainerDataPath(atPath)
+            if self.isTemporaryMountPath(atPath) {
+                try self.requireSafeUnmountedTemporaryDirectory(atPath)
+            } else {
+                try self.requireContainerDataPath(atPath)
+            }
             guard self.fileManager.fileExists(atPath: atPath) else {
                 throw HelperFailure.error("Item does not exist: \(atPath)")
             }
@@ -261,7 +269,7 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
                 ? "Command failed with status \(process.terminationStatus)."
                 : stderr.trimmingCharacters(in: .whitespacesAndNewlines), code: Int(process.terminationStatus))
         }
-        return CommandResult(output: stdout, errorOutput: stderr)
+        return CommandResult(output: stdout)
     }
 
     private func appendCommandOutput(label: String, value: String) {
@@ -329,10 +337,19 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             }
             let storeInfo = try plist("/usr/sbin/diskutil", ["info", "-plist", physicalStore])
             guard (storeInfo["Internal"] as? Bool) == false,
+                  !isDiskImage(storeInfo),
                   ((storeInfo["Content"] as? String)?.lowercased().contains("apfs") == true) else {
                 throw HelperFailure.error("The APFS container is not backed by an external APFS store.")
             }
         }
+    }
+
+    private func isDiskImage(_ info: [String: Any]) -> Bool {
+        let protocolName = (info["BusProtocol"] as? String)
+            ?? (info["DeviceProtocol"] as? String)
+            ?? ""
+        return protocolName.localizedCaseInsensitiveContains("disk image")
+            || (info["DiskImage"] as? Bool) == true
     }
 
     private func requireExternalAPFSVolume(identifier: String) throws {
@@ -346,6 +363,10 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         guard (info["Writable"] as? Bool) == true else {
             throw HelperFailure.error("The selected APFS volume is not writable.")
         }
+        guard let container = info["APFSContainerReference"] as? String else {
+            throw HelperFailure.error("The APFS volume container could not be verified.")
+        }
+        try requireExternalAPFSContainer(identifier: container)
     }
 
     private func volumeDevices(in container: String) throws -> Set<String> {
@@ -354,14 +375,6 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
               let selected = containers.first(where: { ($0["ContainerReference"] as? String) == container }),
               let volumes = selected["Volumes"] as? [[String: Any]] else { return [] }
         return Set(volumes.compactMap { $0["DeviceIdentifier"] as? String })
-    }
-
-    private func mountedPath(for device: String) throws -> String {
-        let info = try plist("/usr/sbin/diskutil", ["info", "-plist", device])
-        guard let path = info["MountPoint"] as? String, !path.isEmpty else {
-            throw HelperFailure.error("The new APFS volume was created but was not mounted.")
-        }
-        return path
     }
 
     private func requireAllowedPath(_ path: String) throws {
@@ -378,6 +391,32 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         let range = NSRange(standardized.startIndex..., in: standardized)
         guard containerPathPattern.firstMatch(in: standardized, range: range) != nil else {
             throw HelperFailure.error("Refusing path outside an app container Data directory: \(path)")
+        }
+    }
+
+    private func isTemporaryMountPath(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return url.deletingLastPathComponent().path == "/Volumes"
+            && url.lastPathComponent.hasPrefix(".PlayCover-ExStorage-")
+    }
+
+    private func requireSafeUnmountedTemporaryDirectory(_ path: String) throws {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+            throw HelperFailure.error("Refusing to delete a temporary mount path that is not a directory: \(path)")
+        }
+
+        var directoryStat = stat()
+        var parentStat = stat()
+        guard lstat(url.path, &directoryStat) == 0,
+              lstat(url.deletingLastPathComponent().path, &parentStat) == 0,
+              directoryStat.st_dev == parentStat.st_dev else {
+            throw HelperFailure.error("Refusing to delete a temporary mount path that may still be mounted: \(path)")
+        }
+
+        guard try fileManager.contentsOfDirectory(atPath: url.path).isEmpty else {
+            throw HelperFailure.error("Refusing to delete a non-empty temporary mount directory: \(path)")
         }
     }
 

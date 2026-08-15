@@ -19,11 +19,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct PlayCover_ExStorageApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    private let dependencies = AppDependencies.live
+
+    init() {
+        MigrationTrace.event(
+            "app.session.started",
+            details: "pid=\(ProcessInfo.processInfo.processIdentifier)"
+        )
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(viewModel: dependencies.makeAppViewModel())
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 980, height: 620)
         .windowResizability(.contentMinSize)
     }

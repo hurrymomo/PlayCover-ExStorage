@@ -13,11 +13,13 @@ PlayCover ExStorage is a macOS utility that moves a PlayCover app's container da
 
 The app only lists external APFS containers. Internal disks and non-APFS filesystems are rejected by the privileged helper.
 
-## What's new in 1.0.1
+## What's new in 1.1.0
 
-- Reconnect can now mount a matching external volume even when the local `Data` directory contains files. The local files are not deleted; they remain safely hidden until the external volume is unmounted.
-- Reconnect now explains when existing local data is being temporarily hidden.
-- The app icon has been rebuilt with Icon Composer for native macOS rendering and consistent sizing.
+- Refactored the app into clear application, domain, infrastructure, and presentation layers.
+- Improved migration state handling, diagnostics, timeout protection, and workflow logging.
+- Added per-app and per-location operation error indicators that clear after a successful action.
+- Added **Open App Data** and **Show in Finder** context-menu actions.
+- Improved migration focus, status layout, drive labels, and protection against actions while migration is active.
 
 ## Downloading the test build
 
@@ -46,10 +48,10 @@ The drive list uses these states:
 
 ## Operation logs
 
-Each operation replaces its previous log and records Helper calls, command arguments, exit status, and command output:
+Migration workflow events and their App/Helper commands share one chronological log. Other operations replace their previous log and record Helper calls, command arguments, exit status, and command output:
 
 ```text
-~/Library/Logs/PlayCover ExStorage/migrate.log
+~/Library/Logs/PlayCover ExStorage/workflow.log
 ~/Library/Logs/PlayCover ExStorage/reconnect.log
 ~/Library/Logs/PlayCover ExStorage/restore.log
 ~/Library/Logs/PlayCover ExStorage/remove.log

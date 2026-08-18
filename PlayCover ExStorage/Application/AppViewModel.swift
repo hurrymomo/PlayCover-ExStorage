@@ -21,17 +21,30 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var dataSizeCache: [String: Int64] = [:]
     @Published private(set) var calculatingDataSizeBundleIDs: Set<String> = []
 
-    @Published var migrationStagesCompleted: Set<MigrationStage> = []
+    @Published var migrationStagesCompleted: Set<MigrationStage> = [] {
+        didSet { mirrorActiveMigrationState() }
+    }
 
-    @Published var operation: AppOperation = .idle
-    @Published var operationMessage: String = "Drop an app and select an external APFS SSD to begin."
-    @Published var operationProgress: Double? = nil
+    // These four properties remain the serial migration scheduler's presentation.
+    // Per-app UI and connection operations use appOperationStates instead.
+    @Published var operation: AppOperation = .idle {
+        didSet { mirrorActiveMigrationState() }
+    }
+    @Published var operationMessage: String = "Drop an app and select an external APFS SSD to begin." {
+        didSet { mirrorActiveMigrationState() }
+    }
+    @Published var operationProgress: Double? = nil {
+        didSet { mirrorActiveMigrationState() }
+    }
+    @Published private(set) var appOperationStates: [String: AppOperationState] = [:]
     @Published var activeDialog: AppDialog? = nil
     @Published var localAppDeletionRequest: LocalAppDeletionRequest? = nil
     @Published var externalAppDeletionRequest: ExternalAppDeletionRequest? = nil
     @Published var volumeDeletionRequest: VolumeDeletionRequest? = nil
     @Published var migrationReconnectChoice: MigrationReconnectChoice? = nil
-    @Published private(set) var activeMigration: MigrationPresentation? = nil
+    @Published private(set) var activeMigration: MigrationPresentation? = nil {
+        didSet { mirrorActiveMigrationState() }
+    }
     @Published private(set) var queuedMigrations: [PendingMigration] = []
     @Published private(set) var preparingMigrations: [PendingMigration] = []
     @Published private(set) var migrationHistory: [MigrationHistoryRecord] = []
@@ -74,15 +87,46 @@ final class AppViewModel: ObservableObject {
     func isMigrationLocked(bundleID: String) -> Bool {
         preparingMigrations.contains(where: { $0.bundleIdentifier == bundleID })
             || queuedMigrations.contains(where: { $0.bundleIdentifier == bundleID })
-            || (operation.isRunning && activeMigration?.bundleIdentifier == bundleID)
+            || appOperationState(for: bundleID).operation.isRunning
+    }
+
+    func appOperationState(for bundleID: String) -> AppOperationState {
+        appOperationStates[bundleID] ?? AppOperationState()
+    }
+
+    func isAppOperationRunning(bundleID: String) -> Bool {
+        appOperationState(for: bundleID).operation.isRunning
     }
 
     func appFailureMessage(bundleID: String) -> String? {
         if let message = migrationErrors[bundleID] { return message }
-        if activeMigration?.bundleIdentifier == bundleID, operation == .failed {
-            return operationMessage
-        }
         return nil
+    }
+
+    private func setAppOperation(
+        bundleID: String,
+        operation: AppOperation,
+        message: String,
+        progress: Double? = nil,
+        migrationStages: Set<MigrationStage> = []
+    ) {
+        appOperationStates[bundleID] = AppOperationState(
+            operation: operation,
+            message: message,
+            progress: progress,
+            migrationStages: migrationStages
+        )
+    }
+
+    private func mirrorActiveMigrationState() {
+        guard let bundleID = activeMigration?.bundleIdentifier else { return }
+        setAppOperation(
+            bundleID: bundleID,
+            operation: operation,
+            message: operationMessage,
+            progress: operationProgress,
+            migrationStages: migrationStagesCompleted
+        )
     }
 
     private func clearAppError(bundleID: String, after action: String) {
@@ -207,9 +251,13 @@ final class AppViewModel: ObservableObject {
 
     func selectContainer(_ container: ExternalAPFSContainer) {
         selectedContainerID = container.id
-        if let applicationName {
-            operation = .idle
-            operationMessage = "\(applicationName) and \(container.displayName ?? container.containerReference) are ready."
+        if let bundleID = bundleIdentifier, let applicationName,
+           !isAppOperationRunning(bundleID: bundleID) {
+            setAppOperation(
+                bundleID: bundleID,
+                operation: .idle,
+                message: "\(applicationName) and \(container.displayName ?? container.containerReference) are ready."
+            )
         }
     }
 
@@ -234,13 +282,17 @@ final class AppViewModel: ObservableObject {
             managedApps.append(record)
         }
         selectedAppBundleID = record.bundleIdentifier
-        migrationStagesCompleted = []
         persistManagedApps()
         if calculateDisplaySize {
             calculateDataSizeIfNeeded(for: record.bundleIdentifier)
         }
-        operation = .idle
-        operationMessage = "\(record.name) is ready. Select an external APFS SSD."
+        if !isAppOperationRunning(bundleID: record.bundleIdentifier) {
+            setAppOperation(
+                bundleID: record.bundleIdentifier,
+                operation: .idle,
+                message: "\(record.name) is ready. Select an external APFS SSD."
+            )
+        }
         return record
     }
 
@@ -249,12 +301,22 @@ final class AppViewModel: ObservableObject {
         calculateDataSizeIfNeeded(for: app.bundleIdentifier)
         guard !app.applicationPath.isEmpty,
               FileManager.default.fileExists(atPath: app.applicationPath) else {
-            operation = .idle
-            operationMessage = "External data was found for \(app.bundleIdentifier), but the app is not installed on this Mac."
+            if !isAppOperationRunning(bundleID: app.bundleIdentifier) {
+                setAppOperation(
+                    bundleID: app.bundleIdentifier,
+                    operation: .idle,
+                    message: "External data was found for \(app.bundleIdentifier), but the app is not installed on this Mac."
+                )
+            }
             return
         }
-        operation = .idle
-        operationMessage = "\(app.name) is ready. Select an external APFS SSD."
+        if !isAppOperationRunning(bundleID: app.bundleIdentifier) {
+            setAppOperation(
+                bundleID: app.bundleIdentifier,
+                operation: .idle,
+                message: "\(app.name) is ready. Select an external APFS SSD."
+            )
+        }
     }
 
     func calculateDataSizeIfNeeded(for bundleID: String) {
@@ -276,16 +338,19 @@ final class AppViewModel: ObservableObject {
         guard let index = managedApps.firstIndex(where: { $0.bundleIdentifier == bundleID }) else { return }
         managedApps[index].persistence = .kept
         persistManagedApps()
-        operationMessage = "\(managedApps[index].name) will remain in All Apps after ExStorage is reopened."
+        setAppOperation(
+            bundleID: bundleID,
+            operation: .succeeded,
+            message: "\(managedApps[index].name) will remain in All Apps after ExStorage is reopened."
+        )
     }
 
     func removeFromLibrary(bundleID: String) {
-        guard let app = managedApps.first(where: { $0.bundleIdentifier == bundleID }) else { return }
+        guard managedApps.contains(where: { $0.bundleIdentifier == bundleID }) else { return }
         managedApps.removeAll { $0.bundleIdentifier == bundleID }
         persistManagedApps()
         if selectedAppBundleID == bundleID { selectedAppBundleID = nil }
-        operation = .idle
-        operationMessage = "Removed \(app.name) from the library. No app data was changed."
+        appOperationStates.removeValue(forKey: bundleID)
     }
 
     func requestDelete(_ app: ManagedApp) {
@@ -653,7 +718,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func finishQueuedMigrationIfNeeded() {
+    private func finishQueuedMigrationIfNeeded(recordFailure: Bool = true) {
         let finishedBatchID = activeMigration?.batchID
         if let bundleID = activeMigration?.bundleIdentifier {
             // A completed migration must never remain represented by a stale
@@ -664,7 +729,7 @@ final class AppViewModel: ObservableObject {
                 bundleID: bundleID,
                 details: "operation=\(operation) queued=\(queuedMigrations.count) preparing=\(preparingMigrations.count) inFlight=\(queuedMigrationInFlight) message=\(operationMessage)"
             )
-            if operation == .failed {
+            if operation == .failed && recordFailure {
                 migrationErrors[bundleID] = operationMessage
             } else if operation == .succeeded {
                 clearAppError(bundleID: bundleID, after: "migrate")
@@ -778,6 +843,7 @@ final class AppViewModel: ObservableObject {
 
     func disconnectAppData() {
         guard let bundleID = bundleIdentifier,
+              !isAppOperationRunning(bundleID: bundleID),
               let volume = containers.flatMap(\.volumes).first(where: {
                   $0.name == bundleID && connectionState(for: $0, bundleID: bundleID) == .connected
               }) else { return }
@@ -787,8 +853,11 @@ final class AppViewModel: ObservableObject {
             bundleID: bundleID,
             details: "path=\(dataPath.path) device=\(volume.bsdDevice ?? "unknown")"
         )
-        operation = .reconnecting
-        operationMessage = "Disconnecting \(bundleID) from external storage…"
+        setAppOperation(
+            bundleID: bundleID,
+            operation: .reconnecting,
+            message: "Disconnecting \(bundleID) from external storage…"
+        )
         Task { [weak self] in
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
@@ -797,13 +866,19 @@ final class AppViewModel: ObservableObject {
                 if let device = volume.bsdDevice {
                     self.updateMountPoint(for: device, to: nil)
                 }
-                self.operation = .succeeded
-                self.operationMessage = "\(bundleID) was disconnected. Its external data was not deleted."
+                self.setAppOperation(
+                    bundleID: bundleID,
+                    operation: .succeeded,
+                    message: "\(bundleID) was disconnected. Its external data was not deleted."
+                )
                 self.clearAppError(bundleID: bundleID, after: "disconnect")
                 MigrationTrace.event("disconnect.succeeded", bundleID: bundleID)
             } catch {
-                self.operation = .failed
-                self.operationMessage = error.localizedDescription
+                self.setAppOperation(
+                    bundleID: bundleID,
+                    operation: .failed,
+                    message: error.localizedDescription
+                )
                 self.migrationErrors[bundleID] = error.localizedDescription
                 MigrationTrace.event(
                     "disconnect.failed",
@@ -834,6 +909,7 @@ final class AppViewModel: ObservableObject {
             openApplication(at: applicationURL)
             return
         }
+        guard !isAppOperationRunning(bundleID: bundleID) else { return }
         activeDialog = .confirmConnectAndOpen(
             appName: applicationName ?? bundleID,
             containerID: container.id
@@ -867,6 +943,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func confirmConnectAndOpen(containerID: UUID) {
+        if let bundleID = bundleIdentifier, isAppOperationRunning(bundleID: bundleID) { return }
         guard let applicationURL,
               let container = containers.first(where: { $0.id == containerID }) else {
             activeDialog = .message(title: "Drive Not Available", message: "The App or its external drive is no longer available.")
@@ -1035,22 +1112,25 @@ final class AppViewModel: ObservableObject {
         persistManagedApps()
     }
 
-    private func validateMigrationInputs() -> Bool {
-        guard bundleIdentifier != nil, applicationName != nil else {
-            operation = .failed
-            operationMessage = "Drop a valid .app with a Bundle ID first."
+    private func validateMigrationInputs(updatesMigrationScheduler: Bool = true) -> Bool {
+        func fail(_ message: String) -> Bool {
+            if !updatesMigrationScheduler, let bundleID = bundleIdentifier {
+                setAppOperation(bundleID: bundleID, operation: .failed, message: message)
+            } else {
+                operation = .failed
+                operationMessage = message
+            }
             return false
         }
+        guard bundleIdentifier != nil, applicationName != nil else {
+            return fail("Drop a valid .app with a Bundle ID first.")
+        }
         guard let _ = containers.first(where: { $0.id == selectedContainerID }) else {
-            operation = .failed
-            operationMessage = "Select an external APFS SSD first."
-            return false
+            return fail("Select an external APFS SSD first.")
         }
         guard let applicationURL,
               FileManager.default.fileExists(atPath: applicationURL.path) else {
-            operation = .failed
-            operationMessage = "Locate or install the matching app before changing its data location."
-            return false
+            return fail("Locate or install the matching app before changing its data location.")
         }
 
         return true
@@ -1128,10 +1208,6 @@ final class AppViewModel: ObservableObject {
         }
 
         MigrationTrace.event("local-to-external.start", bundleID: bundleID, details: "target=\(selected.id) replacing=\(existingVolume != nil)")
-        migrationStagesCompleted = []
-        operation = .migrating
-        operationProgress = 0
-        operationMessage = "Preparing the selected APFS container…"
         archiveFinishedMigration()
         activeMigration = MigrationPresentation(
             batchID: currentMigrationBatchID ?? UUID(),
@@ -1140,6 +1216,10 @@ final class AppViewModel: ObservableObject {
             target: .container(selected.id),
             targetContainerID: selected.id
         )
+        migrationStagesCompleted = []
+        operation = .migrating
+        operationProgress = 0
+        operationMessage = "Preparing the selected APFS container…"
 
         Task { [weak self] in
             guard let self else { return }
@@ -1301,6 +1381,7 @@ final class AppViewModel: ObservableObject {
 
     func requestReconnectAppData() {
         guard let bundleID = bundleIdentifier else { return }
+        guard !isAppOperationRunning(bundleID: bundleID) else { return }
         let dataPath = localDataPath(for: bundleID)
         guard isDirectoryEmptyOrMissing(dataPath) else {
             connectionConflict = ConnectionConflict(bundleIdentifier: bundleID)
@@ -1310,12 +1391,15 @@ final class AppViewModel: ObservableObject {
     }
 
     func reconnectAppData(localDataPolicy: LocalDataConnectionPolicy = .requireEmpty) {
-        guard validateMigrationInputs(), let bundleID = bundleIdentifier,
+        guard validateMigrationInputs(updatesMigrationScheduler: false), let bundleID = bundleIdentifier,
               let selected = containers.first(where: { $0.id == selectedContainerID }) else { return }
+        guard !isAppOperationRunning(bundleID: bundleID) else { return }
 
-        operation = .reconnecting
-        operationProgress = nil
-        operationMessage = "Looking for \(bundleID) on \(selected.displayName ?? selected.containerReference)…"
+        setAppOperation(
+            bundleID: bundleID,
+            operation: .reconnecting,
+            message: "Looking for \(bundleID) on \(selected.displayName ?? selected.containerReference)…"
+        )
 
         Task { [weak self] in
             guard let self else { return }
@@ -1335,8 +1419,11 @@ final class AppViewModel: ObservableObject {
 
                 let dataPath = self.localDataPath(for: bundleID)
                 if connectionState(for: match, bundleID: bundleID) == .connected {
-                    self.operation = .succeeded
-                    self.operationMessage = "\(bundleID) is already connected."
+                    self.setAppOperation(
+                        bundleID: bundleID,
+                        operation: .succeeded,
+                        message: "\(bundleID) is already connected."
+                    )
                     self.clearAppError(bundleID: bundleID, after: "connect")
                     self.markAppManaged(bundleID: bundleID)
                     self.openPendingAppIfNeeded()
@@ -1349,28 +1436,39 @@ final class AppViewModel: ObservableObject {
                 }
                 localDataWillBeHidden = !self.isDirectoryEmptyOrMissing(dataPath)
                 if localDataWillBeHidden && localDataPolicy == .requireEmpty {
-                    self.operation = .idle
+                    self.setAppOperation(bundleID: bundleID, operation: .idle, message: "Ready")
                     self.connectionConflict = ConnectionConflict(bundleIdentifier: bundleID)
                     return
                 }
                 if localDataWillBeHidden && localDataPolicy == .remove {
-                    self.operationMessage = "Removing the local Data directory before connecting…"
+                    self.setAppOperation(
+                        bundleID: bundleID,
+                        operation: .reconnecting,
+                        message: "Removing the local Data directory before connecting…"
+                    )
                     try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
                     localDataWillBeHidden = false
                 } else if localDataWillBeHidden {
-                    self.operationMessage = "The local Data directory is not empty. Reconnecting will temporarily hide its contents without deleting them…"
+                    self.setAppOperation(
+                        bundleID: bundleID,
+                        operation: .reconnecting,
+                        message: "The local Data directory is not empty. Reconnecting will temporarily hide its contents without deleting them…"
+                    )
                 }
                 mountAttempted = true
                 try await self.runPrivileged {
                     try $0.mountAPFS(byDevice: device, at: dataPath, options: ["noowners", "nobrowse"])
                 }
                 self.updateMountPoint(for: device, to: dataPath.path)
-                self.operation = .succeeded
                 self.clearAppError(bundleID: bundleID, after: "connect")
                 self.markAppManaged(bundleID: bundleID)
-                self.operationMessage = localDataWillBeHidden
-                    ? "\(bundleID) is connected. Existing local Data is temporarily hidden and was not deleted."
-                    : "\(bundleID) is connected to \(dataPath.path)."
+                self.setAppOperation(
+                    bundleID: bundleID,
+                    operation: .succeeded,
+                    message: localDataWillBeHidden
+                        ? "\(bundleID) is connected. Existing local Data is temporarily hidden and was not deleted."
+                        : "\(bundleID) is connected to \(dataPath.path)."
+                )
                 self.openPendingAppIfNeeded()
                 if localDataWillBeHidden {
                     self.activeDialog = .message(
@@ -1380,23 +1478,32 @@ final class AppViewModel: ObservableObject {
                 }
             } catch {
                 self.pendingOpenAfterConnectURL = nil
-                self.operation = .failed
                 if mountAttempted {
-                    self.operationMessage = "Reconnect could not mount the external volume. No local backup was modified. Enable Full Disk Access, then try again."
-                    self.activeDialog = .reconnectFailedForFullDiskAccess(error: error.localizedDescription)
+                    self.setAppOperation(
+                        bundleID: bundleID,
+                        operation: .failed,
+                        message: "Reconnect could not mount the external volume. No local backup was modified. Enable Full Disk Access, then try again."
+                    )
+                    self.activeDialog = .localDataMountFailed(error: error.localizedDescription)
                 } else {
-                    self.operationMessage = error.localizedDescription
+                    self.setAppOperation(
+                        bundleID: bundleID,
+                        operation: .failed,
+                        message: error.localizedDescription
+                    )
                 }
             }
         }
     }
 
     func requestRestore() {
+        guard !operation.isRunning else { return }
         guard validateMigrationInputs() else { return }
         activeDialog = .confirmRestore
     }
 
     func restore(overwriteLocalData: Bool = false) {
+        guard !operation.isRunning else { return }
         guard validateMigrationInputs(), let bundleID = bundleIdentifier else { return }
         if let selectedContainerID {
             archiveFinishedMigration()
@@ -1415,6 +1522,7 @@ final class AppViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
+            var localDataMountFailed = false
             do {
                 self.operationMessage = "Checking source size and local free space…"
                 let sourceVolume = self.containers
@@ -1460,8 +1568,14 @@ final class AppViewModel: ObservableObject {
                             try $0.renameItem(from: dataPath, to: overwriteBackupPath)
                         }
                     }
-                    try await self.runPrivileged {
-                        try $0.mountAPFS(byDevice: volume.device, at: dataPath, options: ["noowners", "nobrowse"])
+                    do {
+                        try await self.runPrivileged {
+                            try $0.mountAPFS(byDevice: volume.device, at: dataPath, options: ["noowners", "nobrowse"])
+                        }
+                    } catch {
+                        localDataMountFailed = true
+                        self.activeDialog = .localDataMountFailed(error: error.localizedDescription)
+                        throw error
                     }
                     mountedPath = dataPath
                 }
@@ -1523,9 +1637,11 @@ final class AppViewModel: ObservableObject {
                     }
                 }
                 self.operation = .failed
-                self.operationMessage = error.localizedDescription
+                self.operationMessage = localDataMountFailed
+                    ? "The external volume could not be mounted at the app's local Data folder."
+                    : error.localizedDescription
                 self.presentInsufficientSpaceAlertIfNeeded(error)
-                self.finishQueuedMigrationIfNeeded()
+                self.finishQueuedMigrationIfNeeded(recordFailure: !localDataMountFailed)
             }
         }
     }
@@ -1551,9 +1667,6 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        operation = .migrating
-        operationProgress = 0
-        operationMessage = "Preparing drive-to-drive migration…"
         archiveFinishedMigration()
         activeMigration = MigrationPresentation(
             batchID: pending.batchID,
@@ -1562,12 +1675,17 @@ final class AppViewModel: ObservableObject {
             target: pending.target,
             targetContainerID: targetID
         )
+        operation = .migrating
+        operationProgress = 0
+        operationMessage = "Preparing drive-to-drive migration…"
 
         Task { [weak self] in
             guard let self else { return }
             defer { self.refreshExternalVolumes() }
             let dataPath = self.localDataPath(for: pending.bundleIdentifier)
             var sourceMount = self.usableMountPoint(sourceVolume.mountPoint).map(URL.init(fileURLWithPath:))
+            let originalSourceMount = sourceMount
+            var temporarySourceMount: URL?
             var createdTarget: CreatedAPFSVolume?
             var sourceWasUnmounted = false
             let sourceWasConnected = connectionState(
@@ -1605,13 +1723,12 @@ final class AppViewModel: ObservableObject {
                 }
 
                 if sourceMount == nil {
-                    guard self.isDirectoryEmptyOrMissing(dataPath) else {
-                        throw self.operationError("The local Data directory is not empty, so the source Volume cannot be mounted safely.")
-                    }
+                    let mountPoint = self.temporaryVolumeMountPoint(for: sourceDevice)
                     try await self.runPrivileged {
-                        try $0.mountAPFS(byDevice: sourceDevice, at: dataPath, options: ["noowners", "nobrowse"])
+                        try $0.mountAPFS(byDevice: sourceDevice, at: mountPoint, options: ["noowners", "nobrowse"])
                     }
-                    sourceMount = dataPath
+                    temporarySourceMount = mountPoint
+                    sourceMount = mountPoint
                 }
                 guard let sourceMount else { throw self.operationError("The source Volume could not be mounted.") }
                 MigrationTrace.event("external-to-external.source-mounted", bundleID: pending.bundleIdentifier, details: "path=\(sourceMount.path)")
@@ -1658,6 +1775,9 @@ final class AppViewModel: ObservableObject {
 
                 try await self.runPrivileged { try $0.unmount(byMountPoint: sourceMount) }
                 sourceWasUnmounted = true
+                if let temporarySourceMount {
+                    try? await self.runPrivileged { try $0.deleteItem(at: temporarySourceMount) }
+                }
                 try await self.runPrivileged { try $0.unmount(byMountPoint: targetMount) }
                 try? await self.runPrivileged { try $0.deleteItem(at: targetMount) }
                 var targetMountPoint: String?
@@ -1683,6 +1803,7 @@ final class AppViewModel: ObservableObject {
                         targetMountPoint = dataPath.path
                     } catch {
                         connectionWarning = error.localizedDescription
+                        self.activeDialog = .localDataMountFailed(error: error.localizedDescription)
                         try? await self.runPrivileged { try $0.unmount(byMountPoint: dataPath) }
                     }
                 }
@@ -1744,6 +1865,10 @@ final class AppViewModel: ObservableObject {
                 self.finishQueuedMigrationIfNeeded()
             } catch {
                 MigrationTrace.event("external-to-external.failed", bundleID: pending.bundleIdentifier, details: "error=\(error.localizedDescription)")
+                if let temporarySourceMount {
+                    try? await self.runPrivileged { try $0.unmount(byMountPoint: temporarySourceMount) }
+                    try? await self.runPrivileged { try $0.deleteItem(at: temporarySourceMount) }
+                }
                 if let createdTarget {
                     try? await self.runPrivileged { try $0.unmount(byMountPoint: dataPath) }
                     if let targetMount = createdTarget.mountPoint {
@@ -1758,9 +1883,9 @@ final class AppViewModel: ObservableObject {
                         )
                     }
                 }
-                if sourceWasUnmounted {
+                if sourceWasUnmounted, let originalSourceMount {
                     try? await self.runPrivileged {
-                        try $0.mountAPFS(byDevice: sourceDevice, at: dataPath, options: ["noowners", "nobrowse"])
+                        try $0.mountAPFS(byDevice: sourceDevice, at: originalSourceMount, options: ["noowners", "nobrowse"])
                     }
                 }
                 self.operation = .failed

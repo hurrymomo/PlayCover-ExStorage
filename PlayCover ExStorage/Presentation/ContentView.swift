@@ -80,19 +80,10 @@ struct ContentView: View {
                     primaryButton: .destructive(Text("Restore")) { viewModel.restore() },
                     secondaryButton: .cancel()
                 )
-            case let .migrationRolledBackForFullDiskAccess(error):
+            case let .localDataMountFailed(error):
                 Alert(
-                    title: Text("Migration Rolled Back"),
-                    message: Text("The external volume could not be mounted at the app Data folder. The new volume was removed and the original local Data directory was restored.\n\nThis may be caused by missing Full Disk Access. Enable PlayCover ExStorage in Privacy & Security, then reopen the app and try again.\n\nError: \(error)"),
-                    primaryButton: .default(Text("Open Settings & Quit")) {
-                        openFullDiskAccessSettingsAndQuit()
-                    },
-                    secondaryButton: .cancel(Text("Not Now"))
-                )
-            case let .reconnectFailedForFullDiskAccess(error):
-                Alert(
-                    title: Text("Reconnect Failed"),
-                    message: Text("The external volume could not be mounted at the app Data folder. No local backup was modified, and the external volume remains available.\n\nThis may be caused by missing Full Disk Access. Enable PlayCover ExStorage in Privacy & Security, then reopen the app and try again.\n\nError: \(error)"),
+                    title: Text("App Data Mount Failed"),
+                    message: Text("The external volume could not be mounted at the app's local Data folder. The current operation was stopped safely.\n\nThis may be caused by missing Full Disk Access. Enable PlayCover ExStorage in Privacy & Security, then reopen the app and try again.\n\nError: \(error)"),
                     primaryButton: .default(Text("Open Settings & Quit")) {
                         openFullDiskAccessSettingsAndQuit()
                     },

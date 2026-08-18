@@ -145,10 +145,16 @@ enum AppOperation {
     }
 }
 
+struct AppOperationState: Equatable {
+    var operation: AppOperation = .idle
+    var message: String = "Ready"
+    var progress: Double?
+    var migrationStages: Set<MigrationStage> = []
+}
+
 enum AppDialog: Identifiable {
     case confirmRestore
-    case migrationRolledBackForFullDiskAccess(error: String)
-    case reconnectFailedForFullDiskAccess(error: String)
+    case localDataMountFailed(error: String)
     case confirmExternalOverwrite(PendingMigration)
     case confirmLocalOverwrite(PendingMigration)
     case confirmConnectAndOpen(appName: String, containerID: UUID)
@@ -158,8 +164,7 @@ enum AppDialog: Identifiable {
     var id: String {
         switch self {
         case .confirmRestore: "confirmRestore"
-        case .migrationRolledBackForFullDiskAccess: "migrationRolledBackForFullDiskAccess"
-        case .reconnectFailedForFullDiskAccess: "reconnectFailedForFullDiskAccess"
+        case .localDataMountFailed: "localDataMountFailed"
         case let .confirmExternalOverwrite(pending): "confirmExternalOverwrite-\(pending.id)"
         case let .confirmLocalOverwrite(pending): "confirmLocalOverwrite-\(pending.id)"
         case let .confirmConnectAndOpen(appName, containerID): "confirmConnectAndOpen-\(appName)-\(containerID)"

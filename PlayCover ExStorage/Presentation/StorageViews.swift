@@ -344,14 +344,16 @@ struct MigrationAppPlaceholder: View {
     let app: ManagedApp
     let queued: Bool
 
+    private var appOperation: AppOperationState {
+        viewModel.appOperationState(for: app.bundleIdentifier)
+    }
+
     private var isActive: Bool {
-        viewModel.activeMigration?.bundleIdentifier == app.bundleIdentifier
-            && viewModel.operation.isRunning
+        appOperation.operation.isRunning
     }
 
     private var failed: Bool {
-        viewModel.activeMigration?.bundleIdentifier == app.bundleIdentifier
-            && viewModel.operation == .failed
+        appOperation.operation == .failed
     }
 
     var body: some View {
@@ -374,7 +376,7 @@ struct MigrationAppPlaceholder: View {
                         .font(.title2)
                         .foregroundStyle(.red)
                         .symbolRenderingMode(.hierarchical)
-                } else if isActive, let progress = viewModel.operationProgress {
+                } else if isActive, let progress = appOperation.progress {
                     ZStack {
                         ProgressView(value: progress)
                             .progressViewStyle(.circular)
@@ -406,7 +408,7 @@ struct MigrationAppPlaceholder: View {
         .frame(maxWidth: .infinity)
         .padding(10)
         .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .help(viewModel.operationMessage)
+        .help(appOperation.message)
         .accessibilityLabel("\(app.name), \(queued ? "queued" : (failed ? "migration failed" : progressLabel))")
     }
 
@@ -425,7 +427,7 @@ struct MigrationAppPlaceholder: View {
     }
 
     private var progressLabel: String {
-        guard let progress = viewModel.operationProgress else { return "Preparing…" }
+        guard let progress = appOperation.progress else { return "Preparing…" }
         return "\(Int((progress * 100).rounded()))%"
     }
 }
@@ -487,7 +489,8 @@ struct ManagedAppRow: View {
     }
 
     private var isActiveMigration: Bool {
-        viewModel.operation.isRunning && viewModel.activeMigration?.bundleIdentifier == app.bundleIdentifier
+        let operation = viewModel.appOperationState(for: app.bundleIdentifier).operation
+        return operation == .migrating || operation == .restoring
     }
 
     private var isQueuedMigration: Bool {
@@ -520,7 +523,8 @@ struct ManagedAppRow: View {
                             Text("Queued")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(.white)
-                        } else if isActiveMigration, let progress = viewModel.operationProgress {
+                        } else if isActiveMigration,
+                                  let progress = viewModel.appOperationState(for: app.bundleIdentifier).progress {
                             Text("\(Int((progress * 100).rounded()))%")
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                                 .foregroundStyle(.white)
@@ -592,6 +596,7 @@ struct ManagedAppRow: View {
                     viewModel.selectManagedApp(app)
                     viewModel.requestOpenSelectedApp()
                 }
+                .disabled(viewModel.isAppOperationRunning(bundleID: app.bundleIdentifier))
                 Button("Open App Data") {
                     viewModel.openAppData(for: app)
                 }
@@ -616,12 +621,12 @@ struct ManagedAppRow: View {
                         viewModel.requestReconnectAppData()
                     }
                 }
-                .disabled(matchingVolume == nil || statusText == "Connected")
+                .disabled(viewModel.isAppOperationRunning(bundleID: app.bundleIdentifier) || matchingVolume == nil || statusText == "Connected")
                 Button("Disconnect") {
                     viewModel.selectManagedApp(app)
                     viewModel.disconnectAppData()
                 }
-                .disabled(statusText != "Connected")
+                .disabled(viewModel.isAppOperationRunning(bundleID: app.bundleIdentifier) || statusText != "Connected")
                 Divider()
                 if app.persistence == .sessionOnly, matchingVolume == nil {
                     Button("Keep in Library") {

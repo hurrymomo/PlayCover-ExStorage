@@ -17,7 +17,6 @@ Only external APFS containers are accepted. Internal disks and unsupported files
 
 ## What's new in 1.2.0
 
-- Added a multi-App library with optional **Keep in Library** persistence.
 - Added App-only, Data-only, and App & Data migration between local storage and external containers, including direct container-to-container migration.
 - Added a serial migration queue, durable checkpoints, copy verification, recovery after interruption, and transactional rollback for App & Data migrations.
 - Added an `ExStorage` management Volume for App bundles and per-App metadata, plus dedicated Data Volumes identified by UUID.

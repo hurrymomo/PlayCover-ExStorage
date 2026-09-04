@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>PlayCover ExStorage</title>
+        <item>
+            <title>1.2.0</title>
+            <pubDate>Thu, 03 Sep 2026 20:27:35 -0700</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/hurrymomo/PlayCover-ExStorage/releases/download/v1.2.0/PlayCover-ExStorage-1.2.0-test-unnotarized.dmg" length="7405189" type="application/octet-stream" sparkle:edSignature="Lqv5hysX70srRJUfQYM3/r3BVgfoRFqvKRQcv3oPtQbSwsL6rTszHwhQccV61Z1xNNH8ZXBIHTdoEiNQwtrSBg=="/>
+        </item>
+    </channel>
+</rss>

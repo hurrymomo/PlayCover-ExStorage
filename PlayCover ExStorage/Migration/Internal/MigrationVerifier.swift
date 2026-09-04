@@ -12,16 +12,51 @@ nonisolated enum VolumeMetadataPolicy {
         ".fseventsd",
         ".Trashes",
         ".DocumentRevisions-V100",
-        ".metadata_never_index"
+        ".metadata_never_index",
+        ".ExStoragePartial"
     ]
+
+    /// Archive metadata directories are packaging artifacts rather than App
+    /// business data. Exclude them wherever they occur in a migration tree.
+    static let excludedDirectoryNamesAtAnyDepth: Set<String> = [
+        "__MACOSX",
+        ".ExStoragePartial"
+    ]
+
+    /// Finder may create these while a destination volume is mounted. They
+    /// are not App data and must not make an otherwise complete resumed copy
+    /// fail strict verification.
+    static let excludedFileNamesAtAnyDepth: Set<String> = [".DS_Store"]
 
     static func isExcludedRootItem(_ url: URL) -> Bool {
         excludedRootItemNames.contains(url.lastPathComponent)
     }
+
+    static func isExcludedAtAnyDepth(_ url: URL) -> Bool {
+        excludedDirectoryNamesAtAnyDepth.contains(url.lastPathComponent)
+            || excludedFileNamesAtAnyDepth.contains(url.lastPathComponent)
+    }
 }
+/// Internal filesystem verification support for storage migrations.
 nonisolated enum MigrationVerifier {
     struct Manifest {
         fileprivate let entries: [String: Entry]
+
+        var regularFileSizes: [String: Int64] {
+            entries.compactMapValues { entry in
+                if case .file = entry.kind { return entry.logicalSize }
+                return nil
+            }
+        }
+
+        var totalRegularFileBytes: Int64 {
+            regularFileSizes.values.reduce(0, +)
+        }
+    }
+
+    struct ProgressBaseline {
+        let completedPaths: Set<String>
+        let completedBytes: Int64
     }
 
     fileprivate struct Entry: Equatable {
@@ -42,16 +77,38 @@ nonisolated enum MigrationVerifier {
         let sourceManifest = sourceManifest.entries
         let destinationManifest = try manifest(at: destination)
         guard sourceManifest == destinationManifest else {
-            let missing = sourceManifest.keys.filter { destinationManifest[$0] == nil }.count
-            let unexpected = destinationManifest.keys.filter { sourceManifest[$0] == nil }.count
-            let changed = sourceManifest.keys.filter {
+            let missingPaths = sourceManifest.keys.filter { destinationManifest[$0] == nil }.sorted()
+            let unexpectedPaths = destinationManifest.keys.filter { sourceManifest[$0] == nil }.sorted()
+            let changedPaths = sourceManifest.keys.filter {
                 guard let destinationEntry = destinationManifest[$0] else { return false }
                 return destinationEntry != sourceManifest[$0]
-            }.count
+            }.sorted()
+            let examples = [
+                pathSummary("missing", missingPaths),
+                pathSummary("unexpected", unexpectedPaths),
+                pathSummary("changed", changedPaths)
+            ].compactMap { $0 }.joined(separator: "; ")
             throw verificationError(
-                "Copy verification failed (missing: \(missing), unexpected: \(unexpected), changed: \(changed))."
+                "Copy verification failed (missing: \(missingPaths.count), unexpected: \(unexpectedPaths.count), changed: \(changedPaths.count))."
+                    + (examples.isEmpty ? "" : " \(examples)")
             )
         }
+    }
+
+    static func progressBaseline(sourceManifest: Manifest, destination: URL) throws -> ProgressBaseline {
+        guard FileManager.default.fileExists(atPath: destination.path) else {
+            return ProgressBaseline(completedPaths: [], completedBytes: 0)
+        }
+        let destinationEntries = try manifest(at: destination)
+        let completedPaths: Set<String> = Set(sourceManifest.entries.compactMap { path, sourceEntry -> String? in
+            guard case .file = sourceEntry.kind,
+                  destinationEntries[path] == sourceEntry else { return nil }
+            return path
+        })
+        let completedBytes = completedPaths.reduce(Int64(0)) {
+            $0 + (sourceManifest.entries[$1]?.logicalSize ?? 0)
+        }
+        return ProgressBaseline(completedPaths: completedPaths, completedBytes: completedBytes)
     }
 
     private static func manifest(at root: URL) throws -> [String: Entry] {
@@ -65,7 +122,10 @@ nonisolated enum MigrationVerifier {
             at: root,
             includingPropertiesForKeys: keys,
             options: []
-        ).filter { !VolumeMetadataPolicy.isExcludedRootItem($0) }
+        ).filter {
+            !VolumeMetadataPolicy.isExcludedRootItem($0)
+                && !VolumeMetadataPolicy.isExcludedAtAnyDepth($0)
+        }
 
         func record(_ item: URL) throws {
             let path = item.standardizedFileURL.path
@@ -103,6 +163,10 @@ nonisolated enum MigrationVerifier {
                 }
             ) else { throw verificationError("Could not scan \(rootItem.path).") }
             for case let item as URL in enumerator {
+                if VolumeMetadataPolicy.isExcludedAtAnyDepth(item) {
+                    enumerator.skipDescendants()
+                    continue
+                }
                 try record(item)
             }
             if let enumerationError { throw enumerationError }
@@ -116,5 +180,11 @@ nonisolated enum MigrationVerifier {
             code: 1,
             userInfo: [NSLocalizedDescriptionKey: message]
         )
+    }
+
+    private static func pathSummary(_ label: String, _ paths: [String]) -> String? {
+        guard !paths.isEmpty else { return nil }
+        let sample = paths.prefix(3).joined(separator: ", ")
+        return "\(label): [\(sample)\(paths.count > 3 ? ", …" : "")]"
     }
 }

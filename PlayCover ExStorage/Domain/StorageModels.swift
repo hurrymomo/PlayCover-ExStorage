@@ -4,6 +4,7 @@ import SwiftUI
 nonisolated struct ExternalAPFSContainer: Identifiable, Hashable, Sendable {
     let containerUUID: UUID
     let containerReference: String
+    let physicalStoreDeviceIdentifiers: [String]
     let displayName: String?
     let connectionType: String?
     let capacityTotalBytes: Int64?
@@ -12,9 +13,10 @@ nonisolated struct ExternalAPFSContainer: Identifiable, Hashable, Sendable {
 
     var id: UUID { containerUUID }
 
-    init(containerUUID: UUID, containerReference: String, displayName: String?, connectionType: String? = nil, capacityTotalBytes: Int64?, capacityFreeBytes: Int64?, volumes: [ExternalVolume]) {
+    init(containerUUID: UUID, containerReference: String, physicalStoreDeviceIdentifiers: [String] = [], displayName: String?, connectionType: String? = nil, capacityTotalBytes: Int64?, capacityFreeBytes: Int64?, volumes: [ExternalVolume]) {
         self.containerUUID = containerUUID
         self.containerReference = containerReference
+        self.physicalStoreDeviceIdentifiers = physicalStoreDeviceIdentifiers
         self.displayName = displayName
         self.connectionType = connectionType
         self.capacityTotalBytes = capacityTotalBytes
@@ -88,20 +90,6 @@ func connectionState(for volume: ExternalVolume, bundleID: String?) -> VolumeCon
     return actualMountPath == expectedDataPath ? .connected : .disconnected
 }
 
-enum MigrationStage: String, Identifiable, CaseIterable {
-    case apfsContainerIdentified = "APFS container identified"
-    case applicationVolumeCreated = "Application APFS volume created"
-    case dataCopied = "Data copied"
-    case copyVerified = "Copy verified"
-    case temporaryUnmount = "External volume unmounted"
-    case localBackupCreated = "Local backup created"
-    case mountPointPrepared = "Mount point prepared"
-    case applicationVolumeMounted = "External volume mounted"
-    case mountVerified = "Mount verified"
-
-    var id: String { rawValue }
-}
-
 struct CreatedAPFSVolume {
     let bsdDevice: String
     let mountPoint: URL?
@@ -149,15 +137,12 @@ struct AppOperationState: Equatable {
     var operation: AppOperation = .idle
     var message: String = "Ready"
     var progress: Double?
-    var migrationStages: Set<MigrationStage> = []
 }
 
 enum AppDialog: Identifiable {
     case confirmRestore
     case localDataMountFailed(error: String)
-    case confirmExternalOverwrite(PendingMigration)
-    case confirmLocalOverwrite(PendingMigration)
-    case confirmConnectAndOpen(appName: String, containerID: UUID)
+    case confirmMigrationOverwrite(PendingMigration, appToAdd: AppSnapshot?)
     case confirmMigrationBatch(MigrationBatchRequest)
     case message(title: String, message: String)
 
@@ -165,36 +150,34 @@ enum AppDialog: Identifiable {
         switch self {
         case .confirmRestore: "confirmRestore"
         case .localDataMountFailed: "localDataMountFailed"
-        case let .confirmExternalOverwrite(pending): "confirmExternalOverwrite-\(pending.id)"
-        case let .confirmLocalOverwrite(pending): "confirmLocalOverwrite-\(pending.id)"
-        case let .confirmConnectAndOpen(appName, containerID): "confirmConnectAndOpen-\(appName)-\(containerID)"
+        case let .confirmMigrationOverwrite(pending, _): "confirmMigrationOverwrite-\(pending.id)"
         case let .confirmMigrationBatch(request): "confirmMigrationBatch-\(request.apps.map(\.bundleIdentifier).joined(separator: ","))"
         case let .message(title, message): "message-\(title)-\(message)"
         }
     }
 }
 
-struct MigrationReconnectChoice: Identifiable {
-    let id = UUID()
-    let containerID: ExternalAPFSContainer.ID
-    let diskName: String
-    let volumeName: String
-    let device: String
-    let mountPoint: String?
-}
-
-struct LocalAppDeletionRequest: Identifiable {
-    let app: ManagedApp
-    var id: String { app.bundleIdentifier }
-}
-
-struct ExternalAppDeletionRequest: Identifiable {
-    let app: ManagedApp
-    let volumeName: String
+struct ExternalDataDeletionTarget {
     let device: String
     let volumeUUID: String
     let containerReference: String
-    var id: String { "\(app.bundleIdentifier)-\(volumeUUID)" }
+}
+
+enum AppDataDeletionLocation {
+    case local
+    case external(ExternalDataDeletionTarget)
+}
+
+struct AppDeletionRequest: Identifiable {
+    let app: AppSnapshot
+    let dataLocation: AppDataDeletionLocation
+    var id: String { app.bundleIdentifier }
+}
+
+enum AppDeletionSelection: Equatable {
+    case app
+    case data
+    case appAndData
 }
 
 struct VolumeDeletionRequest: Identifiable {
@@ -205,47 +188,63 @@ struct VolumeDeletionRequest: Identifiable {
     var id: String { "\(device)-\(volumeUUID)" }
 }
 
-enum MigrationTarget: Hashable {
+nonisolated enum MigrationTarget: Hashable, Codable, Sendable {
     case local
     case container(UUID)
 }
 
-struct PendingMigration: Identifiable {
-    let id = UUID()
+nonisolated enum MigrationContent: String, Hashable, Codable, Sendable {
+    case data
+    case app
+    case appAndData
+}
+
+nonisolated struct PendingMigration: Identifiable, Codable, Equatable, Sendable {
+    let id: UUID
     let batchID: UUID
     let bundleIdentifier: String
     let appName: String
     let source: MigrationTarget
     let target: MigrationTarget
+    var content: MigrationContent = .data
     var overwriteExisting = false
-    var focusesSourceOnSuccess = false
+    var recoveryDestinationVolumeUUID: String?
+    var recoveryPhase: MigrationCheckpointPhase?
+
+    init(
+        id: UUID = UUID(),
+        batchID: UUID,
+        bundleIdentifier: String,
+        appName: String,
+        source: MigrationTarget,
+        target: MigrationTarget,
+        content: MigrationContent = .data,
+        overwriteExisting: Bool = false,
+        recoveryDestinationVolumeUUID: String? = nil,
+        recoveryPhase: MigrationCheckpointPhase? = nil
+    ) {
+        self.id = id
+        self.batchID = batchID
+        self.bundleIdentifier = bundleIdentifier
+        self.appName = appName
+        self.source = source
+        self.target = target
+        self.content = content
+        self.overwriteExisting = overwriteExisting
+        self.recoveryDestinationVolumeUUID = recoveryDestinationVolumeUUID
+        self.recoveryPhase = recoveryPhase
+    }
 }
 
 struct MigrationBatchRequest {
-    let apps: [ManagedApp]
+    let apps: [AppSnapshot]
+    let migrations: [PendingMigration]
     let target: MigrationTarget
     let addsToLibrary: Bool
-}
 
-struct MigrationPresentation: Identifiable, Hashable {
-    let id = UUID()
-    let batchID: UUID
-    let bundleIdentifier: String
-    let source: MigrationTarget
-    let target: MigrationTarget
-    let targetContainerID: UUID
-    var targetVolumeUUID: String? = nil
-}
-
-struct MigrationHistoryRecord: Identifiable {
-    let id = UUID()
-    let completedAt = Date()
-    let migration: MigrationPresentation
-    let appName: String
-    let succeeded: Bool
-    let message: String
-    let sourceAvailableBytes: Int64?
-    let targetAvailableBytes: Int64?
+    var conflictingMigrations: [PendingMigration] {
+        migrations.filter(\.overwriteExisting)
+    }
 }
 
 struct ConnectionConflict: Identifiable {
@@ -294,20 +293,43 @@ enum ManagedAppPersistence: String, Codable, Hashable {
     case managed
 }
 
-struct ManagedApp: Identifiable, Codable, Hashable {
+enum ManagedAppSizeState: Hashable {
+    case unknown
+    case calculating
+    case available(Int64)
+}
+
+struct AppSnapshot: Identifiable, Codable, Hashable {
     let bundleIdentifier: String
-    var name: String
-    var applicationPath: String
-    var persistence: ManagedAppPersistence
+    let name: String
+    let applicationPath: String
+    let persistence: ManagedAppPersistence
+    let appSize: ManagedAppSizeState
+    let dataSize: ManagedAppSizeState
+    let appInfo: ExStorageAppInfo?
+    let appInfoContainerID: UUID?
 
     var id: String { bundleIdentifier }
     var applicationURL: URL { URL(fileURLWithPath: applicationPath) }
 
-    init(bundleIdentifier: String, name: String, applicationPath: String, persistence: ManagedAppPersistence) {
+    init(
+        bundleIdentifier: String,
+        name: String,
+        applicationPath: String,
+        persistence: ManagedAppPersistence,
+        appSize: ManagedAppSizeState = .unknown,
+        dataSize: ManagedAppSizeState = .unknown,
+        appInfo: ExStorageAppInfo? = nil,
+        appInfoContainerID: UUID? = nil
+    ) {
         self.bundleIdentifier = bundleIdentifier
         self.name = name
         self.applicationPath = applicationPath
         self.persistence = persistence
+        self.appSize = appSize
+        self.dataSize = dataSize
+        self.appInfo = appInfo
+        self.appInfoContainerID = appInfoContainerID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -322,5 +344,24 @@ struct ManagedApp: Identifiable, Codable, Hashable {
         // Records created by the first multi-App prototype were persisted automatically,
         // so treat them as session candidates until a migration is discovered or the user keeps them.
         persistence = try values.decodeIfPresent(ManagedAppPersistence.self, forKey: .persistence) ?? .sessionOnly
+        appSize = .unknown
+        dataSize = .unknown
+        appInfo = nil
+        appInfoContainerID = nil
+    }
+
+    static func == (lhs: AppSnapshot, rhs: AppSnapshot) -> Bool {
+        lhs.bundleIdentifier == rhs.bundleIdentifier
+            && lhs.name == rhs.name
+            && lhs.applicationPath == rhs.applicationPath
+            && lhs.persistence == rhs.persistence
+            && lhs.appSize == rhs.appSize
+            && lhs.dataSize == rhs.dataSize
+            && lhs.appInfo == rhs.appInfo
+            && lhs.appInfoContainerID == rhs.appInfoContainerID
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(bundleIdentifier)
     }
 }

@@ -1,30 +1,9 @@
 import Foundation
-import Security
+
+// MARK: - Privileged StorageService implementation
+// This target is the root execution boundary. It validates every request again
+// before performing filesystem or APFS changes.
 import Darwin
-
-private let helperMachServiceName = "momo.PlayCover-ExStorage.PrivilegedHelper"
-
-private func authorizedAppRequirement() -> String? {
-    guard let executableURL = Bundle.main.executableURL else { return nil }
-    var code: SecStaticCode?
-    guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &code) == errSecSuccess, let code else { return nil }
-    var information: CFDictionary?
-    guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-          let values = information as? [String: Any],
-          let teamID = values[kSecCodeInfoTeamIdentifier as String] as? String else { return nil }
-    return "anchor apple generic and identifier \"momo.PlayCover-ExStorage\" and certificate leaf[subject.OU] = \"\(teamID)\""
-}
-
-@objc protocol PrivilegedHelperXPCProtocol {
-    func beginOperationLog(atPath: String, reply: @escaping (String?, NSError?) -> Void)
-    func createAPFSVolume(containerReference: String, name: String, reply: @escaping (String?, String?, String?, NSError?) -> Void)
-    func deleteAPFSVolume(device: String, reply: @escaping (String?, NSError?) -> Void)
-    func mountAPFSVolume(device: String, atPath: String, options: [String], reply: @escaping (String?, NSError?) -> Void)
-    func unmountVolume(atPath: String, reply: @escaping (String?, NSError?) -> Void)
-    func renameItem(fromPath: String, toPath: String, reply: @escaping (String?, NSError?) -> Void)
-    func deleteItem(atPath: String, reply: @escaping (String?, NSError?) -> Void)
-    func shutdown(reply: @escaping (String?, NSError?) -> Void)
-}
 
 private struct CommandResult {
     let output: String
@@ -169,9 +148,13 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
     func renameItem(fromPath: String, toPath: String, reply: @escaping (String?, NSError?) -> Void) {
         appendLog("CALL renameItem(fromPath: \(fromPath), toPath: \(toPath))")
         perform(reply) {
-            try self.requireContainerDataPath(fromPath)
-            try self.requireContainerDataPath(toPath)
-            try self.requireSameContainer(fromPath, toPath)
+            if self.isRecoveryPath(fromPath) {
+                try self.requireRecoveryDestination(fromPath: fromPath, toPath: toPath)
+            } else {
+                try self.requireContainerDataPath(fromPath)
+                try self.requireContainerDataPath(toPath)
+                try self.requireSameContainer(fromPath, toPath)
+            }
             guard self.fileManager.fileExists(atPath: fromPath) else {
                 throw HelperFailure.error("Source does not exist: \(fromPath)")
             }
@@ -189,6 +172,8 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         perform(reply) {
             if self.isTemporaryMountPath(atPath) {
                 try self.requireSafeUnmountedTemporaryDirectory(atPath)
+            } else if self.isRecoveryPath(atPath) {
+                try self.requireRecoveryPath(atPath)
             } else {
                 try self.requireContainerDataPath(atPath)
             }
@@ -394,6 +379,40 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         }
     }
 
+    private func isRecoveryPath(_ path: String) -> Bool {
+        let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        guard components.count == 9,
+              components[0] == "/",
+              components[1] == "Users",
+              !components[2].isEmpty,
+              components[3] == "Library",
+              components[4] == "Application Support",
+              components[5] == "PlayCover ExStorage",
+              components[6] == "Recovery",
+              components[8] == "Data.restore-in-progress" else { return false }
+        let range = NSRange(components[7].startIndex..., in: components[7])
+        return bundleIDPattern.firstMatch(in: components[7], range: range) != nil
+    }
+
+    private func requireRecoveryPath(_ path: String) throws {
+        guard isRecoveryPath(path) else {
+            throw HelperFailure.error("Refusing path outside the ExStorage recovery directory: \(path)")
+        }
+    }
+
+    private func requireRecoveryDestination(fromPath: String, toPath: String) throws {
+        try requireRecoveryPath(fromPath)
+        try requireContainerDataPath(toPath)
+        let source = URL(fileURLWithPath: fromPath).standardizedFileURL.pathComponents
+        let destination = URL(fileURLWithPath: toPath).standardizedFileURL.pathComponents
+        guard source.count == 9, destination.count >= 4,
+              source[7] == destination[destination.count - 2],
+              source[2] == destination[2],
+              destination.last == "Data" else {
+            throw HelperFailure.error("Recovery source and destination do not belong to the same user and App container.")
+        }
+    }
+
     private func isTemporaryMountPath(_ path: String) -> Bool {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         return url.deletingLastPathComponent().path == "/Volumes"
@@ -445,23 +464,3 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         }
     }
 }
-
-final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate {
-    private let service = PrivilegedHelperService()
-
-    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard let requirement = authorizedAppRequirement() else { return false }
-        connection.setCodeSigningRequirement(requirement)
-        connection.exportedInterface = NSXPCInterface(with: PrivilegedHelperXPCProtocol.self)
-        connection.exportedObject = service
-        connection.invalidationHandler = { DispatchQueue.main.async { exit(EXIT_SUCCESS) } }
-        connection.resume()
-        return true
-    }
-}
-
-let delegate = HelperListenerDelegate()
-let listener = NSXPCListener(machServiceName: helperMachServiceName)
-listener.delegate = delegate
-listener.resume()
-RunLoop.current.run()

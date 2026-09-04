@@ -101,7 +101,7 @@ private actor VolumeRoundRobinScheduler {
     }
 }
 
-// MARK: - Storage Discovery (read-only, using diskutil -plist)
+// MARK: - Internal storage discovery (read-only, using diskutil -plist)
 nonisolated struct DiskUtilDiscovery {
     struct VolumeIdentity {
         let volumeUUID: String
@@ -134,6 +134,7 @@ nonisolated struct DiskUtilDiscovery {
     }
 
     static func discoverExternalAPFSContainersProgressively(
+        onPhysicalDevice physicalDevice: String? = nil,
         onContainer: @escaping @MainActor @Sendable (ExternalAPFSContainer) -> Void,
         onVolume: @escaping @MainActor @Sendable (UUID, ExternalVolume) -> Void
     ) async {
@@ -148,6 +149,10 @@ nonisolated struct DiskUtilDiscovery {
                   let rawStores = container["PhysicalStores"] as? [[String: Any]] else { return nil }
             let stores = rawStores.compactMap { $0["DeviceIdentifier"] as? String }
             guard !stores.isEmpty, stores.count == rawStores.count else { return nil }
+            if let physicalDevice,
+               !stores.contains(where: { belongs($0, toPhysicalDevice: physicalDevice) }) {
+                return nil
+            }
             let jobs = (container["Volumes"] as? [[String: Any]] ?? []).compactMap { volume -> VolumeScanJob? in
                 guard let device = volume["DeviceIdentifier"] as? String else { return nil }
                 return VolumeScanJob(
@@ -196,6 +201,10 @@ nonisolated struct DiskUtilDiscovery {
         await volumeWorkers
     }
 
+    private static func belongs(_ store: String, toPhysicalDevice device: String) -> Bool {
+        store == device || store.hasPrefix("\(device)s")
+    }
+
     private static func validateContainer(_ seed: ContainerScanSeed) -> ValidatedContainerScan? {
         let storeInfo = seed.physicalStores.compactMap { device -> [String: Any]? in
             guard let data = runDiskutil(args: ["info", "-plist", "/dev/\(device)"]) else { return nil }
@@ -212,6 +221,7 @@ nonisolated struct DiskUtilDiscovery {
         let container = ExternalAPFSContainer(
             containerUUID: seed.id,
             containerReference: seed.reference,
+            physicalStoreDeviceIdentifiers: seed.physicalStores,
             displayName: info["MediaName"] as? String,
             connectionType: connectionType,
             capacityTotalBytes: seed.capacityTotalBytes,

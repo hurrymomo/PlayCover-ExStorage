@@ -12,16 +12,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        XPCPrivilegedClient.shared.shutdownHelper()
+        UserStorageService.shared.shutdownPrivilegedHelper()
     }
 }
 
 @main
 struct PlayCover_ExStorageApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    private let dependencies = AppDependencies.live
+    @StateObject private var updateController = UpdateController()
+    @StateObject private var viewModel: AppViewModel
+    private let model: AppModel
+    private let appStore: any ManagedAppPersisting
+    private let storageService: any StorageServicing
+    private let migrationService: MigrationService
 
     init() {
+        let model = AppModel()
+        let viewModel = AppViewModel()
+        self.model = model
+        _viewModel = StateObject(wrappedValue: viewModel)
+        appStore = ManagedAppStore()
+        storageService = UserStorageService.shared
+        migrationService = MigrationService(
+            model: model,
+            storageService: storageService,
+            appStore: appStore
+        )
         MigrationTrace.event(
             "app.session.started",
             details: "pid=\(ProcessInfo.processInfo.processIdentifier)"
@@ -30,10 +46,34 @@ struct PlayCover_ExStorageApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: dependencies.makeAppViewModel())
+            ContentView(
+                model: model,
+                viewModel: viewModel,
+                appStore: appStore,
+                storageService: storageService,
+                migrationService: migrationService
+            )
+                .environmentObject(model)
+                .environmentObject(updateController)
+                .task {
+                    guard ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] != "1" else {
+                        return
+                    }
+                    let snapshot = await storageService.scanSnapshot()
+                    model.replaceStorage(with: snapshot)
+                    updateController.checkForUpdates(.silent)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 980, height: 620)
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updateController.checkForUpdates(.interactive)
+                }
+                .disabled(!updateController.canCheckForUpdates)
+            }
+        }
     }
 }

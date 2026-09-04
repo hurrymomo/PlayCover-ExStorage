@@ -1,4 +1,4 @@
-PlayCover ExStorage 1.0 — Unnotarized Test Build
+PlayCover ExStorage 1.2.0 — Unnotarized Test Build
 
 This build is signed with an Apple Development certificate but is not notarized by Apple.
 
@@ -13,3 +13,12 @@ Only download this build from the official GitHub repository:
 https://github.com/hurrymomo/PlayCover-ExStorage
 
 This app performs privileged disk and filesystem operations. Keep a separate backup of important data.
+
+中文安装说明
+1. 将 PlayCover ExStorage.app 拖入窗口中的 Applications 快捷方式。
+2. 从 Applications 打开应用。
+3. 如果 macOS 阻止启动，请前往“系统设置 → 隐私与安全性”，选择“仍要打开”。
+4. 系统要求时，请在“系统设置 → 通用 → 登录项”中允许 PlayCover ExStorage。
+5. 如果无法把 Volume 挂载到 App container 的 Data 目录，请授予完全磁盘访问权限。
+
+本测试版本使用 Apple Development 证书签名，未经 Apple 公证。应用会执行需要管理员权限的磁盘操作，请先备份重要数据。

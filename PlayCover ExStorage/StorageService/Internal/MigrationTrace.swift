@@ -4,6 +4,7 @@ import os
 /// Unified migration trace that starts before privileged logging is available.
 /// App workflow events, copy diagnostics, Helper calls, and diskutil output all
 /// append to this file in chronological order.
+/// Internal diagnostic support for StorageService workflows.
 nonisolated enum MigrationTrace {
     private static let lock = NSLock()
     private static let logger = Logger(

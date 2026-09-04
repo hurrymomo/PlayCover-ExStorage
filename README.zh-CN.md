@@ -17,7 +17,6 @@ PlayCover ExStorage 是一款 macOS 工具，用于在本地存储和外置 APFS
 
 ## 1.2.0 更新内容
 
-- 新增多 App Library，并可通过 **Keep in Library** 让记录在重启后继续保留。
 - 支持单独迁移 App、单独迁移 Data，以及同时迁移 App 和 Data；支持本地与外置 container 之间以及两个外置 container 之间直接迁移。
 - 新增串行迁移队列、持久化检查点、复制校验、中断恢复，以及 App & Data 事务回滚。
 - 每个 APFS container 使用一个 `ExStorage` 管理 Volume 保存 App 和 AppInfo，并使用 UUID 定位每个 App 的独立 Data Volume。

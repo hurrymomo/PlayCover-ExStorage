@@ -33,11 +33,24 @@ final class MigrationCombinedExecutor {
         completion: @escaping @MainActor (Result<Void, Error>) -> Void
     ) {
         Task {
-            do {
-                try await executeAsync(request)
-                completion(.success(()))
-            } catch {
-                completion(.failure(error))
+            await MigrationTrace.$migrationID.withValue(request.id) {
+                MigrationTrace.event(
+                    "migration.execution.started",
+                    bundleID: request.bundleIdentifier,
+                    details: "content=\(request.content.rawValue)"
+                )
+                do {
+                    try await executeAsync(request)
+                    MigrationTrace.event("migration.execution.succeeded", bundleID: request.bundleIdentifier)
+                    completion(.success(()))
+                } catch {
+                    MigrationTrace.event(
+                        "migration.execution.failed",
+                        bundleID: request.bundleIdentifier,
+                        details: "error=\(error.localizedDescription)"
+                    )
+                    completion(.failure(error))
+                }
             }
         }
     }

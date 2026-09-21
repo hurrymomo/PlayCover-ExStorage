@@ -12,7 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        UserStorageService.shared.shutdownPrivilegedHelper()
+        StorageServiceFactory.live.shutdownPrivilegedHelper()
+        MigrationTrace.event("app.session.ended", details: "pid=\(ProcessInfo.processInfo.processIdentifier)")
     }
 }
 
@@ -32,15 +33,17 @@ struct PlayCover_ExStorageApp: App {
         self.model = model
         _viewModel = StateObject(wrappedValue: viewModel)
         appStore = ManagedAppStore()
-        storageService = UserStorageService.shared
+        storageService = StorageServiceFactory.live
         migrationService = MigrationService(
             model: model,
             storageService: storageService,
             appStore: appStore
         )
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
         MigrationTrace.event(
             "app.session.started",
-            details: "pid=\(ProcessInfo.processInfo.processIdentifier)"
+            details: "pid=\(ProcessInfo.processInfo.processIdentifier) version=\(version) build=\(build) os=\(ProcessInfo.processInfo.operatingSystemVersionString)"
         )
     }
 
@@ -59,7 +62,7 @@ struct PlayCover_ExStorageApp: App {
                     guard ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] != "1" else {
                         return
                     }
-                    let snapshot = await storageService.scanSnapshot()
+                    let snapshot = await storageService.scanSnapshot(onPhysicalDevice: nil)
                     model.replaceStorage(with: snapshot)
                     updateController.checkForUpdates(.silent)
                 }
@@ -73,6 +76,10 @@ struct PlayCover_ExStorageApp: App {
                     updateController.checkForUpdates(.interactive)
                 }
                 .disabled(!updateController.canCheckForUpdates)
+                Divider()
+                Button("Show Logs in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([MigrationTrace.logURL])
+                }
             }
         }
     }

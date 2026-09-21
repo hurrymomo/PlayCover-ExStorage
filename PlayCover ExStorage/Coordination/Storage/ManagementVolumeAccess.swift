@@ -2,14 +2,12 @@ import Foundation
 
 struct ManagementVolumeContext: Sendable {
     let root: URL
-    let device: String
     let volumeUUID: String
-    let mountedTemporarily: Bool
 }
 
-/// Shared StorageService infrastructure for controlled access to the
-/// ExStorage management volume. Migration and discovery consume this without
-/// exposing APFS mount mechanics through their public interfaces.
+/// Application-level coordination for the product-specific ExStorage
+/// management volume. It combines the StorageService API, AppModel, and the
+/// metadata store without making any of them depend on each other.
 @MainActor
 final class ManagementVolumeAccess {
     private let model: AppModel
@@ -54,9 +52,7 @@ final class ManagementVolumeAccess {
             existingMountPoint = nil
         }
 
-        guard let identity = await Task.detached(priority: .userInitiated, operation: {
-            DiskUtilDiscovery.volumeIdentity(for: device)
-        }).value,
+        guard let identity = await storage.volumeIdentity(for: device),
         identity.containerReference == container.containerReference else {
             throw error("The ExStorage management volume identity could not be verified.")
         }
@@ -66,10 +62,8 @@ final class ManagementVolumeAccess {
         }
 
         let root: URL
-        let mountedTemporarily: Bool
         if let existingMountPoint {
             root = URL(fileURLWithPath: existingMountPoint, isDirectory: true)
-            mountedTemporarily = false
         } else {
             root = managementVolumeMountPoint(volumeUUID: identity.volumeUUID)
             try await storage.mountAPFSVolume(
@@ -77,7 +71,6 @@ final class ManagementVolumeAccess {
                 at: root,
                 options: ["noowners", "nobrowse"]
             )
-            mountedTemporarily = true
         }
 
         _ = try await metadata.initialize(
@@ -98,17 +91,8 @@ final class ManagementVolumeAccess {
         )
         return ManagementVolumeContext(
             root: root,
-            device: device,
-            volumeUUID: identity.volumeUUID,
-            mountedTemporarily: mountedTemporarily
+            volumeUUID: identity.volumeUUID
         )
-    }
-
-    func releaseManagementVolumeIfNeeded(_ context: ManagementVolumeContext) async throws {
-        // Management volumes are persistent runtime infrastructure. They stay
-        // mounted after discovery, access, and creation so externally stored
-        // applications remain continuously available. Physical device removal
-        // is handled by Disk Arbitration and AppModel invalidation.
     }
 
     private func managementVolumeMountPoint(volumeUUID: String) -> URL {
@@ -121,23 +105,6 @@ final class ManagementVolumeAccess {
             return nil
         }
         return path
-    }
-
-    private func updateMountPoint(for device: String, to mountPoint: String?) {
-        model.replaceContainers(model.allContainers().map { container in
-            ExternalAPFSContainer(
-                containerUUID: container.containerUUID,
-                containerReference: container.containerReference,
-                physicalStoreDeviceIdentifiers: container.physicalStoreDeviceIdentifiers,
-                displayName: container.displayName,
-                connectionType: container.connectionType,
-                capacityTotalBytes: container.capacityTotalBytes,
-                capacityFreeBytes: container.capacityFreeBytes,
-                volumes: container.volumes.map {
-                    $0.bsdDevice == device ? $0.replacingMountPoint(mountPoint) : $0
-                }
-            )
-        })
     }
 
     private func addOrUpdateVolume(containerID: UUID, volume: ExternalVolume) {

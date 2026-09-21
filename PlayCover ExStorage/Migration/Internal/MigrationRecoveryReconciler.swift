@@ -48,7 +48,6 @@ enum MigrationRecoveryReconciler {
         let access = ManagementVolumeAccess(model: model, storage: storage, metadata: metadata)
         let management = try await access.prepareManagementVolume(for: container)
         guard expectedVolumeUUID.caseInsensitiveCompare(management.volumeUUID) == .orderedSame else {
-            try await access.releaseManagementVolumeIfNeeded(management)
             return record
         }
 
@@ -59,8 +58,7 @@ enum MigrationRecoveryReconciler {
             storage: storage,
             metadata: metadata
         )
-        guard sourceExists == false, storage.itemExists(at: destination) else {
-            try await access.releaseManagementVolumeIfNeeded(management)
+        guard sourceExists == false, FileSystemUtilities.itemExists(at: destination) else {
             return record
         }
 
@@ -102,7 +100,7 @@ enum MigrationRecoveryReconciler {
     ) async throws -> Bool? {
         switch location {
         case let .local(path):
-            return storage.itemExists(at: ExStorageLayout.resolveLocalPath(path))
+            return FileSystemUtilities.itemExists(at: ExStorageLayout.resolveLocalPath(path))
         case .dataVolume:
             return nil
         case let .managementVolume(volumeUUID, relativePath):
@@ -114,11 +112,11 @@ enum MigrationRecoveryReconciler {
             let access = ManagementVolumeAccess(model: model, storage: storage, metadata: metadata)
             let management = try await access.prepareManagementVolume(for: container)
             guard management.volumeUUID.caseInsensitiveCompare(volumeUUID) == .orderedSame else {
-                try await access.releaseManagementVolumeIfNeeded(management)
                 return nil
             }
-            let exists = storage.itemExists(at: management.root.appendingPathComponent(relativePath))
-            try await access.releaseManagementVolumeIfNeeded(management)
+            let exists = FileSystemUtilities.itemExists(
+                at: management.root.appendingPathComponent(relativePath)
+            )
             return exists
         }
     }
@@ -130,7 +128,7 @@ enum MigrationRecoveryReconciler {
     ) -> Bool {
         switch location {
         case let .local(path):
-            return storage.itemExists(at: ExStorageLayout.resolveLocalPath(path))
+            return FileSystemUtilities.itemExists(at: ExStorageLayout.resolveLocalPath(path))
         case let .dataVolume(volumeUUID), let .managementVolume(volumeUUID, _):
             return model.allContainers().contains { container in
                 container.volumes.contains {

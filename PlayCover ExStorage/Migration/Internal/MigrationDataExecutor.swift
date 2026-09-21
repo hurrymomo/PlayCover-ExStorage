@@ -43,11 +43,24 @@ final class MigrationDataExecutor {
         completion: @escaping @MainActor (Result<Void, Error>) -> Void
     ) {
         Task {
-            do {
-                try await executeAsync(request)
-                completion(.success(()))
-            } catch {
-                completion(.failure(error))
+            await MigrationTrace.$migrationID.withValue(request.id) {
+                MigrationTrace.event(
+                    "migration.execution.started",
+                    bundleID: request.bundleIdentifier,
+                    details: "content=\(request.content.rawValue)"
+                )
+                do {
+                    try await executeAsync(request)
+                    MigrationTrace.event("migration.execution.succeeded", bundleID: request.bundleIdentifier)
+                    completion(.success(()))
+                } catch {
+                    MigrationTrace.event(
+                        "migration.execution.failed",
+                        bundleID: request.bundleIdentifier,
+                        details: "error=\(error.localizedDescription)"
+                    )
+                    completion(.failure(error))
+                }
             }
         }
     }
@@ -91,9 +104,7 @@ final class MigrationDataExecutor {
         if model.managedAppContainer(for: bundleID)?.id == sourceContainer.id {
             throw failure("The App is also stored on the source storage. Migrate App & Data together.")
         }
-        guard let sourceIdentity = await Task.detached(priority: .userInitiated, operation: {
-            DiskUtilDiscovery.volumeIdentity(for: sourceDevice)
-        }).value,
+        guard let sourceIdentity = await storage.volumeIdentity(for: sourceDevice),
         sourceIdentity.containerReference == sourceContainer.containerReference else {
             throw failure("The source Data Volume identity could not be verified.")
         }
@@ -125,9 +136,7 @@ final class MigrationDataExecutor {
         var targetOriginalInfo: ExStorageAppInfo?
 
         do {
-            let logURL = try OperationLog.prepare(named: "migrate")
-            try await storage.beginPrivilegedOperationLog(at: logURL)
-            try await storage.ensurePrivilegedHelperAvailable()
+            let logURL = MigrationTrace.prepareCommandLog(kind: "migrate")
             sourceManagement = try await migrationStorage.prepareManagementVolume(for: sourceContainer)
             targetManagement = try await migrationStorage.prepareManagementVolume(for: targetContainer)
             guard let targetManagement else { throw failure("The target management Volume is unavailable.") }
@@ -144,9 +153,9 @@ final class MigrationDataExecutor {
             }
             guard let sourceMount else { throw failure("The source Data Volume could not be mounted.") }
             let requiredBytes = try await Task.detached(priority: .utility) {
-                try self.storage.allocatedSize(of: sourceMount)
+                try MigrationFileOperations.allocatedSize(of: sourceMount)
             }.value
-            let capacity = await freshAvailableCapacity(targetContainer.id)
+            let capacity = await freshAvailableCapacity(targetContainer)
             try ensureSufficientSpace(
                 requiredBytes: requiredBytes,
                 availableBytes: capacity.map { $0 + (replacedTarget?.usedBytes ?? 0) },
@@ -165,9 +174,7 @@ final class MigrationDataExecutor {
                     name: bundleID
                 )
             }
-            guard let identity = await Task.detached(priority: .userInitiated, operation: {
-                DiskUtilDiscovery.volumeIdentity(for: created.bsdDevice)
-            }).value,
+            guard let identity = await storage.volumeIdentity(for: created.bsdDevice),
             identity.containerReference == targetContainer.containerReference else {
                 throw failure("The target Data Volume identity could not be verified.")
             }
@@ -220,7 +227,8 @@ final class MigrationDataExecutor {
 
             var finalMountPoint: String?
             if sourceWasConnected {
-                if storage.itemExists(at: dataPath), storage.directoryIsEmptyOrMissing(at: dataPath) {
+                if FileSystemUtilities.itemExists(at: dataPath),
+                   FileSystemUtilities.directoryIsEmptyOrMissing(at: dataPath) {
                     try await storage.deletePrivilegedItem(at: dataPath)
                 }
                 try ensureLocalDataDirectory(bundleID: bundleID)
@@ -243,9 +251,7 @@ final class MigrationDataExecutor {
                 )
             )
             if let replacedDevice = replacedTarget?.bsdDevice,
-               let replacedIdentity = await Task.detached(priority: .userInitiated, operation: {
-                   DiskUtilDiscovery.volumeIdentity(for: replacedDevice)
-               }).value {
+               let replacedIdentity = await storage.volumeIdentity(for: replacedDevice) {
                 try await deleteVerifiedVolume(
                     device: replacedDevice,
                     expectedUUID: replacedIdentity.volumeUUID,
@@ -267,8 +273,6 @@ final class MigrationDataExecutor {
             if let sourceManagement {
                 try? await metadata.deleteAppInfo(bundleID: bundleID, at: sourceManagement.root)
             }
-            try await migrationStorage.releaseManagementVolumeIfNeeded(targetManagement)
-            if let sourceManagement { try await migrationStorage.releaseManagementVolumeIfNeeded(sourceManagement) }
             statusReporter.update(
                 message: "App data was migrated to the target SSD.",
                 progress: 1
@@ -305,8 +309,6 @@ final class MigrationDataExecutor {
                     try? await metadata.deleteAppInfo(bundleID: bundleID, at: targetManagement.root)
                 }
             }
-            if let targetManagement { try? await migrationStorage.releaseManagementVolumeIfNeeded(targetManagement) }
-            if let sourceManagement { try? await migrationStorage.releaseManagementVolumeIfNeeded(sourceManagement) }
             throw error
         }
     }
@@ -321,9 +323,7 @@ final class MigrationDataExecutor {
               let sourceDevice = sourceVolume.bsdDevice else {
             throw failure("The source Data Volume is unavailable.")
         }
-        guard let sourceIdentity = await Task.detached(priority: .userInitiated, operation: {
-            DiskUtilDiscovery.volumeIdentity(for: sourceDevice)
-        }).value,
+        guard let sourceIdentity = await storage.volumeIdentity(for: sourceDevice),
         sourceIdentity.containerReference == container.containerReference else {
             throw failure("The source Data Volume identity could not be verified.")
         }
@@ -332,7 +332,7 @@ final class MigrationDataExecutor {
             requiredBytes = used
         } else if let mount = usableMountPoint(sourceVolume.mountPoint) {
             requiredBytes = try await Task.detached(priority: .utility) {
-                try self.storage.allocatedSize(of: URL(fileURLWithPath: mount))
+                try MigrationFileOperations.allocatedSize(of: URL(fileURLWithPath: mount))
             }.value
         } else {
             throw failure("The source data size could not be determined safely.")
@@ -346,7 +346,7 @@ final class MigrationDataExecutor {
         setOperation("Preparing to restore local App data…", progress: 0)
         let backupPath = dataPath.deletingLastPathComponent()
             .appendingPathComponent("Data.overwrite-backup", isDirectory: true)
-        let recoveryPath = storage.homeDirectory
+        let recoveryPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/PlayCover ExStorage/Recovery", isDirectory: true)
             .appendingPathComponent(bundleID, isDirectory: true)
             .appendingPathComponent("Data.restore-in-progress", isDirectory: true)
@@ -357,9 +357,7 @@ final class MigrationDataExecutor {
         var originalInfo: ManagedApplicationInfo?
 
         do {
-            let logURL = try OperationLog.prepare(named: "restore")
-            try await storage.beginPrivilegedOperationLog(at: logURL)
-            try await storage.ensurePrivilegedHelperAvailable()
+            let logURL = MigrationTrace.prepareCommandLog(kind: "restore")
             management = try await migrationStorage.prepareManagementVolume(for: container)
             guard let management else { throw failure("The source ExStorage management volume is unavailable.") }
             var info = try await loadOrCreateAppInfo(
@@ -379,14 +377,14 @@ final class MigrationDataExecutor {
                 originalMount = URL(fileURLWithPath: mounted)
                 try await storage.unmountVolume(at: originalMount!)
             }
-            if !storage.directoryIsEmptyOrMissing(at: dataPath) {
+            if !FileSystemUtilities.directoryIsEmptyOrMissing(at: dataPath) {
                 guard request.overwriteExisting else {
                     throw failure("The local Data directory is not empty. Explicit overwrite approval is required.")
                 }
-                if storage.itemExists(at: backupPath), !resuming {
+                if FileSystemUtilities.itemExists(at: backupPath), !resuming {
                     throw failure("A previous overwrite backup still exists.")
                 }
-                if !storage.itemExists(at: backupPath) {
+                if !FileSystemUtilities.itemExists(at: backupPath) {
                     try await storage.movePrivilegedItem(from: dataPath, to: backupPath)
                 }
             }
@@ -398,10 +396,10 @@ final class MigrationDataExecutor {
                 at: mount,
                 options: ["noowners", "nobrowse"]
             )
-            if storage.itemExists(at: recoveryPath), !resuming {
+            if FileSystemUtilities.itemExists(at: recoveryPath), !resuming {
                 try await storage.deletePrivilegedItem(at: recoveryPath)
             }
-            try storage.createDirectory(
+            try FileManager.default.createDirectory(
                 at: recoveryPath.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
@@ -430,7 +428,7 @@ final class MigrationDataExecutor {
             temporaryMount = nil
             try? await storage.deletePrivilegedItem(at: mount)
             try ensureLocalDataDirectory(bundleID: bundleID)
-            if storage.itemExists(at: dataPath) {
+            if FileSystemUtilities.itemExists(at: dataPath) {
                 try await storage.deletePrivilegedItem(at: dataPath)
             }
             try await storage.movePrivilegedItem(from: recoveryPath, to: dataPath)
@@ -439,7 +437,7 @@ final class MigrationDataExecutor {
                 expectedUUID: sourceIdentity.volumeUUID,
                 containerReference: container.containerReference
             )
-            if storage.itemExists(at: backupPath) {
+            if FileSystemUtilities.itemExists(at: backupPath) {
                 try await storage.deletePrivilegedItem(at: backupPath)
             }
             info.data.location = .local(path: ExStorageLayout.portableLocalPath(dataPath))
@@ -448,14 +446,13 @@ final class MigrationDataExecutor {
             try persistCommittedState(info)
             removeVolume(device: sourceDevice)
             markManaged(bundleID)
-            try await migrationStorage.releaseManagementVolumeIfNeeded(management)
             statusReporter.update(
                 message: "Local data was restored and the external Data Volume was removed.",
                 progress: 1
             )
         } catch {
             runtime.setPhase(.rollingBack)
-            if storage.itemExists(at: recoveryPath) {
+            if FileSystemUtilities.itemExists(at: recoveryPath) {
                 try? await storage.deletePrivilegedItem(at: recoveryPath)
             }
             if let temporaryMount {
@@ -469,15 +466,17 @@ final class MigrationDataExecutor {
                     options: ["noowners", "nobrowse"]
                 )
             }
-            if storage.itemExists(at: backupPath), storage.directoryIsEmptyOrMissing(at: dataPath) {
-                if storage.itemExists(at: dataPath) { try? await storage.deletePrivilegedItem(at: dataPath) }
+            if FileSystemUtilities.itemExists(at: backupPath),
+               FileSystemUtilities.directoryIsEmptyOrMissing(at: dataPath) {
+                if FileSystemUtilities.itemExists(at: dataPath) {
+                    try? await storage.deletePrivilegedItem(at: dataPath)
+                }
                 try? await storage.movePrivilegedItem(from: backupPath, to: dataPath)
             }
             if var originalInfo, let management {
                 originalInfo.data.migration = nil
                 _ = try? await metadata.saveAppInfo(originalInfo, at: management.root)
             }
-            if let management { try? await migrationStorage.releaseManagementVolumeIfNeeded(management) }
             throw error
         }
     }
@@ -497,9 +496,9 @@ final class MigrationDataExecutor {
 
         setOperation("Checking source size and target free space…", progress: 0)
         let requiredBytes = try await Task.detached(priority: .utility) {
-            try self.storage.allocatedSize(of: dataPath)
+            try MigrationFileOperations.allocatedSize(of: dataPath)
         }.value
-        let availableCapacity = await freshAvailableCapacity(container.id)
+        let availableCapacity = await freshAvailableCapacity(container)
         try ensureSufficientSpace(
             requiredBytes: requiredBytes,
             availableBytes: availableCapacity.map {
@@ -514,9 +513,7 @@ final class MigrationDataExecutor {
         var targetUUID: String?
         var targetOriginalInfo: ExStorageAppInfo?
         do {
-            let logURL = try OperationLog.prepare(named: "migrate")
-            try await storage.beginPrivilegedOperationLog(at: logURL)
-            try await storage.ensurePrivilegedHelperAvailable()
+            let logURL = MigrationTrace.prepareCommandLog(kind: "migrate")
             management = try await migrationStorage.prepareManagementVolume(for: container)
             guard let management else { throw failure("The ExStorage management volume is unavailable.") }
             targetOriginalInfo = try await metadata.loadAppInfo(bundleID: bundleID, at: management.root)
@@ -532,9 +529,7 @@ final class MigrationDataExecutor {
                     name: bundleID
                 ).bsdDevice
             }
-            guard let identity = await Task.detached(priority: .userInitiated, operation: {
-                DiskUtilDiscovery.volumeIdentity(for: device)
-            }).value,
+            guard let identity = await storage.volumeIdentity(for: device),
             identity.containerReference == container.containerReference else {
                 throw failure("The destination Data Volume identity could not be verified.")
             }
@@ -582,7 +577,7 @@ final class MigrationDataExecutor {
             try? await storage.deletePrivilegedItem(at: mount)
             // Idempotent commit: after a crash during commit the source may
             // already be gone; repeating deletion remains successful.
-            if storage.itemExists(at: dataPath) {
+            if FileSystemUtilities.itemExists(at: dataPath) {
                 try await storage.deletePrivilegedItem(at: dataPath)
             }
             info.data.location = .dataVolume(volumeUUID: identity.volumeUUID)
@@ -602,7 +597,6 @@ final class MigrationDataExecutor {
                 )
             )
             markManaged(bundleID)
-            try await migrationStorage.releaseManagementVolumeIfNeeded(management)
             statusReporter.update(
                 message: "App data is now stored on the external APFS Volume and remains disconnected.",
                 progress: 1
@@ -627,7 +621,6 @@ final class MigrationDataExecutor {
                     )
                     removeVolume(device: targetDevice)
                 }
-                try? await migrationStorage.releaseManagementVolumeIfNeeded(management)
             }
             throw error
         }
@@ -751,14 +744,20 @@ final class MigrationDataExecutor {
         }
     }
 
-    private func freshAvailableCapacity(_ containerID: UUID) async -> Int64? {
-        await Task.detached(priority: .utility) {
-            DiskUtilDiscovery.containerFreeCapacitySnapshots()[containerID]
-        }.value
+    private func freshAvailableCapacity(_ container: ExternalAPFSContainer) async -> Int64? {
+        let capacity = await storage.availableCapacity(for: container)
+        if let capacity {
+            model.updateContainerFreeCapacity(
+                capacity,
+                for: container.id,
+                expectedContainerReference: container.containerReference
+            )
+        }
+        return capacity
     }
 
     private func localAvailableCapacity() -> Int64? {
-        guard let bytes = try? storage.homeDirectory
+        guard let bytes = try? FileManager.default.homeDirectoryForCurrentUser
             .resourceValues(forKeys: [.volumeAvailableCapacityKey])
             .volumeAvailableCapacity else { return nil }
         return Int64(bytes)
@@ -769,9 +768,7 @@ final class MigrationDataExecutor {
         expectedUUID: String,
         containerReference: String
     ) async throws {
-        let identity = await Task.detached(priority: .userInitiated) {
-            DiskUtilDiscovery.volumeIdentity(for: device)
-        }.value
+        let identity = await storage.volumeIdentity(for: device)
         guard identity?.volumeUUID == expectedUUID,
               identity?.containerReference == containerReference else {
             throw failure("Refusing to delete a Data Volume whose identity changed.")
@@ -828,7 +825,7 @@ final class MigrationDataExecutor {
     }
 
     private func localDataPath(_ bundleID: String) -> URL {
-        storage.homeDirectory
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers", isDirectory: true)
             .appendingPathComponent(bundleID, isDirectory: true)
             .appendingPathComponent("Data", isDirectory: true)
@@ -856,14 +853,17 @@ final class MigrationDataExecutor {
     /// container path also covers Apps whose bundle-ID directory is missing.
     private func ensureLocalDataDirectory(bundleID: String) throws {
         let dataPath = localDataPath(bundleID)
-        switch storage.itemKind(at: dataPath) {
+        switch FileSystemUtilities.itemKind(at: dataPath) {
         case .directory:
             return
         case .file:
             throw failure("The local Data path for \(bundleID) exists but is not a directory.")
         case .missing:
             do {
-                try storage.createDirectory(at: dataPath, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(
+                    at: dataPath,
+                    withIntermediateDirectories: true
+                )
             } catch {
                 throw failure("Could not create \(bundleID)/Data: \(error.localizedDescription)")
             }

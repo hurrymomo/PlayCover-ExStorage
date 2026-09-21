@@ -41,7 +41,7 @@ extension ManagedAppActions {
         calculateDataSizeIfNeeded(for: app.bundleIdentifier)
         calculateAppSizeIfNeeded(for: app.bundleIdentifier)
         guard !app.applicationPath.isEmpty,
-              storageService.itemExists(at: app.applicationURL) else {
+              FileSystemUtilities.itemExists(at: app.applicationURL) else {
             if !isAppOperationRunning(bundleID: app.bundleIdentifier) {
                 setAppOperation(
                     bundleID: app.bundleIdentifier,
@@ -65,10 +65,9 @@ extension ManagedAppActions {
               apps[index].dataSize == .unknown else { return }
         model.updateDataSize(.calculating, for: bundleID)
         let dataPath = localDataPath(for: bundleID)
-        let storageService = storageService
         Task { [weak self] in
             let size = await Task.detached(priority: .utility) {
-                try? storageService.allocatedSize(of: dataPath)
+                try? FileSystemUtilities.allocatedSize(of: dataPath)
             }.value
             guard let self else { return }
             self.model.updateDataSize(
@@ -82,13 +81,12 @@ extension ManagedAppActions {
         guard let index = apps.firstIndex(where: { $0.bundleIdentifier == bundleID }),
               apps[index].appSize == .unknown,
               let app = apps.first(where: { $0.bundleIdentifier == bundleID }),
-              storageService.itemExists(at: app.applicationURL) else { return }
+              FileSystemUtilities.itemExists(at: app.applicationURL) else { return }
         model.updateAppSize(.calculating, for: bundleID)
         let applicationURL = app.applicationURL
-        let storageService = storageService
         Task { [weak self] in
             let size = await Task.detached(priority: .utility) {
-                try? storageService.allocatedSize(of: applicationURL)
+                try? FileSystemUtilities.allocatedSize(of: applicationURL)
             }.value
             guard let self else { return }
             self.model.updateAppSize(
@@ -118,9 +116,6 @@ extension ManagedAppActions {
     }
 
     func restoreManagedApps() {
-        // The legacy single-App key would otherwise resurrect the last session-only drop
-        // every time the new persistent registry is empty.
-        UserDefaults.standard.removeObject(forKey: Self.lastAppPathKey)
         ManagedAppLibrary.restore(into: model, from: appStore)
         // Launch into the All Apps overview. Individual Apps are selected only after an
         // explicit click or drop, so the initial status bar shows the library summary.
@@ -287,7 +282,7 @@ extension ManagedAppActions {
         expectedBundleID: String? = nil
     ) -> AppSnapshot? {
         guard url.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
-              storageService.itemKind(at: url) == .directory,
+              FileSystemUtilities.itemKind(at: url) == .directory,
               let record = managedAppRecord(from: url),
               expectedBundleID == nil || record.bundleIdentifier == expectedBundleID else {
             return nil

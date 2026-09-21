@@ -3,9 +3,9 @@ import Foundation
 /// Stateless registry operations over the authoritative AppModel.
 @MainActor
 enum ManagedAppLibrary {
-    static func isInstalled(_ app: AppSnapshot, using storage: any StorageServicing) -> Bool {
+    static func isInstalled(_ app: AppSnapshot) -> Bool {
         guard !app.applicationPath.isEmpty,
-              storage.itemExists(at: app.applicationURL),
+              FileSystemUtilities.itemExists(at: app.applicationURL),
               let bundle = Bundle(url: app.applicationURL) else { return false }
         return bundle.bundleIdentifier == app.bundleIdentifier
     }

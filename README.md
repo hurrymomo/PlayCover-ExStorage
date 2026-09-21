@@ -15,15 +15,13 @@ PlayCover ExStorage is a macOS utility for moving PlayCover Apps and their conta
 
 Only external APFS containers are accepted. Internal disks and unsupported filesystems are rejected by the privileged helper.
 
-## What's new in 1.2.0
+## What's new in 1.2.1
 
-- Added App-only, Data-only, and App & Data migration between local storage and external containers, including direct container-to-container migration.
-- Added a serial migration queue, durable checkpoints, copy verification, recovery after interruption, and transactional rollback for App & Data migrations.
-- Added an `ExStorage` management Volume for App bundles and per-App metadata, plus dedicated Data Volumes identified by UUID.
-- Added per-App operation state so connecting or disconnecting one App does not overwrite another App's migration progress.
-- Added **Connect & Open**, local Data conflict handling, and access to otherwise unmanaged Volumes.
-- Improved deletion choices, migration validation, status presentation, and mount cleanup.
-- Added signed Sparkle update support for releases after 1.2.0.
+- Migration capacity checks now query only the selected target APFS container, so unrelated duplicate UUID records no longer interfere with migration.
+- Fresh target capacity results are reflected in the App immediately.
+- An `ExStorage` management Volume is no longer created automatically on an unrelated external container without a Volume matching a local App container.
+- Added correlated workflow and privileged Helper logs with bounded rotation, migration/session/operation identifiers, and retained capacity-query responses for issue diagnosis.
+- Improved handling of slow privileged disk commands and XPC connection failures.
 
 ## Downloading the test build
 
@@ -95,6 +93,12 @@ Operation logs are stored under:
 ```text
 ~/Library/Logs/PlayCover ExStorage/
 ```
+
+After a failure, choose **Show Logs in Finder** from the application menu, compress the log folder, and attach it to your issue.
+`workflow.log` records app/OS versions, application workflow events, and unprivileged copy diagnostics. `helper.log` records privileged operations. Each log rotates at approximately 8 MB and retains one previous file, for two files per log. Matching `operation` UUIDs connect each Helper call to its begin/result events in `workflow.log`.
+Every application log entry includes one launch-scoped `session` UUID. Entries produced while a migration executes also include its durable `migration` UUID; concurrent migrations keep independent IDs through Swift task-local context.
+`CapacityQueries/` retains the last ten raw plist responses from target APFS container capacity queries, saved before parsing to help diagnose duplicate records or identity mismatches.
+Logs may include local paths, volume names, and disk UUIDs; review them before sharing. For a crash, also attach the app's macOS crash report.
 
 ## Building from source
 

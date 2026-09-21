@@ -35,11 +35,24 @@ final class MigrationAppExecutor {
         completion: @escaping @MainActor (Result<Void, Error>) -> Void
     ) {
         Task {
-            do {
-                try await executeAsync(request)
-                completion(.success(()))
-            } catch {
-                completion(.failure(error))
+            await MigrationTrace.$migrationID.withValue(request.id) {
+                MigrationTrace.event(
+                    "migration.execution.started",
+                    bundleID: request.bundleIdentifier,
+                    details: "content=\(request.content.rawValue)"
+                )
+                do {
+                    try await executeAsync(request)
+                    MigrationTrace.event("migration.execution.succeeded", bundleID: request.bundleIdentifier)
+                    completion(.success(()))
+                } catch {
+                    MigrationTrace.event(
+                        "migration.execution.failed",
+                        bundleID: request.bundleIdentifier,
+                        details: "error=\(error.localizedDescription)"
+                    )
+                    completion(.failure(error))
+                }
             }
         }
     }
@@ -102,8 +115,6 @@ final class MigrationAppExecutor {
             throw failure("The external App location does not belong to the source storage.")
         }
 
-        var sourceManagement: ManagementVolumeContext?
-        var targetManagement: ManagementVolumeContext?
         var staging: URL?
         var destination: URL?
         var destinationBackup: URL?
@@ -111,11 +122,8 @@ final class MigrationAppExecutor {
         var sourceWasDeleted = false
 
         do {
-            sourceManagement = try await migrationStorage.prepareManagementVolume(for: sourceContainer)
-            targetManagement = try await migrationStorage.prepareManagementVolume(for: targetContainer)
-            guard let sourceManagement, let targetManagement else {
-                throw failure("An ExStorage management volume is unavailable.")
-            }
+            let sourceManagement = try await migrationStorage.prepareManagementVolume(for: sourceContainer)
+            let targetManagement = try await migrationStorage.prepareManagementVolume(for: targetContainer)
             guard sourceManagement.volumeUUID.caseInsensitiveCompare(sourceVolumeUUID) == .orderedSame else {
                 throw failure("The source App management volume identity changed.")
             }
@@ -129,21 +137,28 @@ final class MigrationAppExecutor {
             }
 
             let source = sourceManagement.root.appendingPathComponent(sourceRelativePath)
-            guard storage.itemExists(at: source), Bundle(url: source)?.bundleIdentifier == bundleID else {
+            guard FileSystemUtilities.itemExists(at: source),
+                  Bundle(url: source)?.bundleIdentifier == bundleID else {
                 throw failure("The external App bundle is missing or invalid.")
             }
             let applications = targetManagement.root.appendingPathComponent(
                 ExStorageLayout.applicationsDirectoryName,
                 isDirectory: true
             )
-            try storage.createDirectory(at: applications, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: applications,
+                withIntermediateDirectories: true
+            )
             let targetURL = applications.appendingPathComponent(source.lastPathComponent, isDirectory: true)
             destination = targetURL
             if let interrupted = info.bundle.migration?.stagingRelativePath {
                 let interruptedURL = applications.appendingPathComponent(interrupted)
-                if storage.itemExists(at: interruptedURL) { try storage.removeItem(at: interruptedURL) }
+                if FileSystemUtilities.itemExists(at: interruptedURL) {
+                    try FileManager.default.removeItem(at: interruptedURL)
+                }
             }
-            if storage.itemExists(at: targetURL), Bundle(url: targetURL)?.bundleIdentifier != bundleID {
+            if FileSystemUtilities.itemExists(at: targetURL),
+               Bundle(url: targetURL)?.bundleIdentifier != bundleID {
                 throw failure("An unrelated item already exists at \(targetURL.lastPathComponent).")
             }
             let targetLocation = ManagedLocation.managementVolume(
@@ -162,7 +177,7 @@ final class MigrationAppExecutor {
                 stagingRelativePath: stagingURL.lastPathComponent
             )
             try checkpoint(info, phase: .copying, progress: 0.15)
-            let logURL = try OperationLog.prepare(named: "migrate")
+            let logURL = MigrationTrace.prepareCommandLog(kind: "migrate")
             try await MigrationFileOperations.copyApplication(
                 from: source,
                 to: stagingURL,
@@ -172,15 +187,15 @@ final class MigrationAppExecutor {
             try checkpoint(info, phase: .verifying, progress: 0.65)
             try await MigrationFileOperations.verifyApplication(from: source, to: stagingURL)
 
-            if storage.itemExists(at: targetURL) {
+            if FileSystemUtilities.itemExists(at: targetURL) {
                 let backup = applications.appendingPathComponent(
                     ".\(targetURL.lastPathComponent).\(UUID().uuidString).overwrite-backup",
                     isDirectory: true
                 )
-                try storage.moveItem(from: targetURL, to: backup)
+                try FileManager.default.moveItem(at: targetURL, to: backup)
                 destinationBackup = backup
             }
-            try storage.moveItem(from: stagingURL, to: targetURL)
+            try FileManager.default.moveItem(at: stagingURL, to: targetURL)
             staging = nil
             destinationCommitted = true
             info.bundle.migration?.verified = true
@@ -189,36 +204,32 @@ final class MigrationAppExecutor {
 
             info.bundle.location = targetLocation
             info.bundle.migration = nil
-            try storage.removeItem(at: source)
+            try FileManager.default.removeItem(at: source)
             sourceWasDeleted = true
             // The external metadata is already committed and the source has
             // been removed. A best-effort journal refresh must not turn that
             // completed move into a second rollback transaction.
             try? persistCommittedState(info)
             updateManagedApp(bundleID: bundleID, path: targetURL.path)
-            if let destinationBackup, storage.itemExists(at: destinationBackup) {
-                try? storage.removeItem(at: destinationBackup)
+            if let destinationBackup, FileSystemUtilities.itemExists(at: destinationBackup) {
+                try? FileManager.default.removeItem(at: destinationBackup)
             }
-            try? await migrationStorage.releaseManagementVolumeIfNeeded(targetManagement)
-            try? await migrationStorage.releaseManagementVolumeIfNeeded(sourceManagement)
         } catch {
             runtime.setPhase(.rollingBack)
-            if let staging, storage.itemExists(at: staging) { try? storage.removeItem(at: staging) }
+            if let staging, FileSystemUtilities.itemExists(at: staging) {
+                try? FileManager.default.removeItem(at: staging)
+            }
 
             if !sourceWasDeleted {
-                if destinationCommitted, let destination, storage.itemExists(at: destination) {
-                    try? storage.removeItem(at: destination)
+                if destinationCommitted,
+                   let destination,
+                   FileSystemUtilities.itemExists(at: destination) {
+                    try? FileManager.default.removeItem(at: destination)
                 }
                 if let destinationBackup, let destination,
-                   storage.itemExists(at: destinationBackup) {
-                    try? storage.moveItem(from: destinationBackup, to: destination)
+                   FileSystemUtilities.itemExists(at: destinationBackup) {
+                    try? FileManager.default.moveItem(at: destinationBackup, to: destination)
                 }
-            }
-            if let targetManagement {
-                try? await migrationStorage.releaseManagementVolumeIfNeeded(targetManagement)
-            }
-            if let sourceManagement {
-                try? await migrationStorage.releaseManagementVolumeIfNeeded(sourceManagement)
             }
             throw error
         }
@@ -238,26 +249,29 @@ final class MigrationAppExecutor {
         if info.localAppPathHint == nil, case let .local(path) = originalLocation {
             info.localAppPathHint = path
         }
-        var management: ManagementVolumeContext?
         var staging: URL?
 
         do {
-            management = try await migrationStorage.prepareManagementVolume(for: target)
-            guard let management else { throw failure("The ExStorage management volume is unavailable.") }
+            let management = try await migrationStorage.prepareManagementVolume(for: target)
             let applications = management.root.appendingPathComponent(
                 ExStorageLayout.applicationsDirectoryName,
                 isDirectory: true
             )
-            try storage.createDirectory(at: applications, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: applications,
+                withIntermediateDirectories: true
+            )
             let destination = applications.appendingPathComponent(
                 source.lastPathComponent,
                 isDirectory: true
             )
             if let interrupted = info.bundle.migration?.stagingRelativePath {
                 let interruptedURL = applications.appendingPathComponent(interrupted)
-                if storage.itemExists(at: interruptedURL) { try storage.removeItem(at: interruptedURL) }
+                if FileSystemUtilities.itemExists(at: interruptedURL) {
+                    try FileManager.default.removeItem(at: interruptedURL)
+                }
             }
-            if storage.itemExists(at: destination) {
+            if FileSystemUtilities.itemExists(at: destination) {
                 guard Bundle(url: destination)?.bundleIdentifier == bundleID else {
                     throw failure("An unrelated item already exists at \(destination.lastPathComponent).")
                 }
@@ -279,7 +293,7 @@ final class MigrationAppExecutor {
                 stagingRelativePath: stagingURL.lastPathComponent
             )
             try checkpoint(info, phase: .copying, progress: 0.15)
-            let logURL = try OperationLog.prepare(named: "migrate")
+            let logURL = MigrationTrace.prepareCommandLog(kind: "migrate")
             try await MigrationFileOperations.copyApplication(
                 from: source,
                 to: stagingURL,
@@ -288,8 +302,10 @@ final class MigrationAppExecutor {
             info.bundle.migration?.phase = .verifying
             try checkpoint(info, phase: .verifying, progress: 0.65)
             try await MigrationFileOperations.verifyApplication(from: source, to: stagingURL)
-            if storage.itemExists(at: destination) { try storage.removeItem(at: destination) }
-            try storage.moveItem(from: stagingURL, to: destination)
+            if FileSystemUtilities.itemExists(at: destination) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: stagingURL, to: destination)
             staging = nil
             info.bundle.migration?.verified = true
             info.bundle.migration?.phase = .committing
@@ -311,15 +327,13 @@ final class MigrationAppExecutor {
             }
             try persistCommittedState(info)
             updateManagedApp(bundleID: bundleID, path: destination.path)
-            try await migrationStorage.releaseManagementVolumeIfNeeded(management)
         } catch {
             runtime.setPhase(.rollingBack)
-            if let staging, storage.itemExists(at: staging) { try? storage.removeItem(at: staging) }
-            if let management {
-                info.bundle.location = originalLocation
-                info.bundle.migration = nil
-                try? await migrationStorage.releaseManagementVolumeIfNeeded(management)
+            if let staging, FileSystemUtilities.itemExists(at: staging) {
+                try? FileManager.default.removeItem(at: staging)
             }
+            info.bundle.location = originalLocation
+            info.bundle.migration = nil
             throw error
         }
     }
@@ -335,14 +349,14 @@ final class MigrationAppExecutor {
             throw failure("The external App location is unavailable.")
         }
         let originalLocation = info.bundle.location
-        var management: ManagementVolumeContext?
         var staging: URL?
 
         do {
-            management = try await migrationStorage.prepareManagementVolume(for: container)
-            guard let management else { throw failure("The ExStorage management volume is unavailable.") }
+            let management = try await migrationStorage.prepareManagementVolume(for: container)
             let source = management.root.appendingPathComponent(relativePath)
-            guard storage.itemExists(at: source) else { throw failure("The external App bundle is missing.") }
+            guard FileSystemUtilities.itemExists(at: source) else {
+                throw failure("The external App bundle is missing.")
+            }
             guard let storedInfo = try await metadata.loadAppInfo(
                 bundleID: bundleID,
                 at: management.root
@@ -356,15 +370,20 @@ final class MigrationAppExecutor {
                 pathHint: recordedHint
             )
             let applications = destination.deletingLastPathComponent()
-            try storage.createDirectory(at: applications, withIntermediateDirectories: true)
-            if storage.itemExists(at: destination) {
+            try FileManager.default.createDirectory(
+                at: applications,
+                withIntermediateDirectories: true
+            )
+            if FileSystemUtilities.itemExists(at: destination) {
                 guard Bundle(url: destination)?.bundleIdentifier == bundleID else {
                     throw failure("An unrelated App already exists at \(destination.path).")
                 }
             }
             if let interrupted = info.bundle.migration?.stagingRelativePath {
                 let interruptedURL = applications.appendingPathComponent(interrupted)
-                if storage.itemExists(at: interruptedURL) { try storage.removeItem(at: interruptedURL) }
+                if FileSystemUtilities.itemExists(at: interruptedURL) {
+                    try FileManager.default.removeItem(at: interruptedURL)
+                }
             }
             let stagingURL = applications.appendingPathComponent(
                 ".\(source.lastPathComponent).\(UUID().uuidString).in-progress",
@@ -379,7 +398,7 @@ final class MigrationAppExecutor {
                 stagingRelativePath: stagingURL.lastPathComponent
             )
             try checkpoint(info, phase: .copying, progress: 0.15)
-            let logURL = try OperationLog.prepare(named: "migrate")
+            let logURL = MigrationTrace.prepareCommandLog(kind: "migrate")
             try await MigrationFileOperations.copyApplication(from: source, to: stagingURL, logURL: logURL)
             info.bundle.migration?.phase = .verifying
             try checkpoint(info, phase: .verifying, progress: 0.65)
@@ -387,10 +406,12 @@ final class MigrationAppExecutor {
             info.bundle.migration?.verified = true
             info.bundle.migration?.phase = .committing
             try checkpoint(info, phase: .committing, progress: 0.9)
-            if storage.itemExists(at: destination) { try storage.removeItem(at: destination) }
-            try storage.moveItem(from: stagingURL, to: destination)
+            if FileSystemUtilities.itemExists(at: destination) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: stagingURL, to: destination)
             staging = nil
-            try storage.removeItem(at: source)
+            try FileManager.default.removeItem(at: source)
             info.bundle.location = localLocation
             info.localAppPathHint = recordedHint
             info.bundle.migration = nil
@@ -398,15 +419,13 @@ final class MigrationAppExecutor {
             model.setAppInfo(storedInfo, containerID: container.id)
             try persistCommittedState(info)
             updateManagedApp(bundleID: bundleID, path: destination.path)
-            try await migrationStorage.releaseManagementVolumeIfNeeded(management)
         } catch {
             runtime.setPhase(.rollingBack)
-            if let staging, storage.itemExists(at: staging) { try? storage.removeItem(at: staging) }
-            if let management {
-                info.bundle.location = originalLocation
-                info.bundle.migration = nil
-                try? await migrationStorage.releaseManagementVolumeIfNeeded(management)
+            if let staging, FileSystemUtilities.itemExists(at: staging) {
+                try? FileManager.default.removeItem(at: staging)
             }
+            info.bundle.location = originalLocation
+            info.bundle.migration = nil
             throw error
         }
     }
@@ -466,7 +485,7 @@ final class MigrationAppExecutor {
         bundleID: String,
         pathHint: String?
     ) -> URL {
-        let fallback = storage.homeDirectory
+        let fallback = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications", isDirectory: true)
             .appendingPathComponent(source.lastPathComponent, isDirectory: true)
         guard let pathHint, !pathHint.isEmpty else { return fallback }
@@ -474,12 +493,12 @@ final class MigrationAppExecutor {
         guard candidate.pathExtension.caseInsensitiveCompare("app") == .orderedSame else {
             return fallback
         }
-        let home = storage.homeDirectory.standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         let path = candidate.path
         let isInsideHome = path.hasPrefix(home + "/")
         let isInsideApplications = path.hasPrefix("/Applications/")
         guard isInsideHome || isInsideApplications else { return fallback }
-        if storage.itemExists(at: candidate),
+        if FileSystemUtilities.itemExists(at: candidate),
            Bundle(url: candidate)?.bundleIdentifier != bundleID {
             return fallback
         }
@@ -498,8 +517,8 @@ final class MigrationAppExecutor {
             throw failure("Refusing to permanently delete a path that is not an App bundle.")
         }
         try await Task.detached(priority: .utility) {
-            guard self.storage.itemExists(at: url) else { return }
-            try self.storage.removeItem(at: url)
+            guard FileSystemUtilities.itemExists(at: url) else { return }
+            try FileManager.default.removeItem(at: url)
         }.value
     }
 

@@ -22,7 +22,7 @@ extension ManagedAppActions {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.runPrivileged { try $0.unmount(byMountPoint: dataPath) }
+                try await self.storageService.unmountVolume(at: dataPath)
                 if let device = volume.bsdDevice {
                     self.updateMountPoint(for: device, to: nil)
                 }
@@ -52,7 +52,7 @@ extension ManagedAppActions {
 
     func requestOpenSelectedApp() {
         guard let applicationURL,
-              storageService.itemExists(at: applicationURL) else {
+              FileSystemUtilities.itemExists(at: applicationURL) else {
             activeDialog = .message(title: "App Not Found", message: "Locate or add the app again before opening it.")
             return
         }
@@ -77,7 +77,7 @@ extension ManagedAppActions {
         let containerURL = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Containers", isDirectory: true)
             .appendingPathComponent(app.bundleIdentifier, isDirectory: true)
-        guard storageService.itemExists(at: containerURL) else {
+        guard FileSystemUtilities.itemExists(at: containerURL) else {
             activeDialog = .message(
                 title: "App Data Not Found",
                 message: "No container exists at \(containerURL.path). Launch the App once, then try again."
@@ -89,7 +89,7 @@ extension ManagedAppActions {
 
     func showAppInFinder(_ app: AppSnapshot) {
         let applicationURL = app.applicationURL
-        guard storageService.itemExists(at: applicationURL) else {
+        guard FileSystemUtilities.itemExists(at: applicationURL) else {
             activeDialog = .message(
                 title: "App Not Found",
                 message: "The recorded App no longer exists at \(applicationURL.path)."
@@ -142,7 +142,7 @@ extension ManagedAppActions {
         guard let bundleID = bundleIdentifier else { return }
         guard let applicationName,
               let applicationURL,
-              storageService.itemExists(at: applicationURL) else {
+              FileSystemUtilities.itemExists(at: applicationURL) else {
             setAppOperation(
                 bundleID: bundleID,
                 operation: .failed,
@@ -171,8 +171,7 @@ extension ManagedAppActions {
             var mountAttempted = false
             var localDataWillBeHidden = false
             do {
-                let logURL = try OperationLog.prepare(named: "reconnect")
-                try await self.runPrivileged { try $0.beginOperationLog(at: logURL) }
+                _ = MigrationTrace.prepareCommandLog(kind: "reconnect")
                 guard let match = self.managedDataVolume(for: bundleID),
                       selected.volumes.contains(where: { $0.id == match.id }),
                       let device = match.bsdDevice else {
@@ -192,9 +191,9 @@ extension ManagedAppActions {
                     return
                 }
                 if let currentMount = self.usableMountPoint(match.mountPoint) {
-                    try await self.runPrivileged {
-                        try $0.unmount(byMountPoint: URL(fileURLWithPath: currentMount))
-                    }
+                    try await self.storageService.unmountVolume(
+                        at: URL(fileURLWithPath: currentMount)
+                    )
                     self.updateMountPoint(for: device, to: nil)
                 }
                 localDataWillBeHidden = !self.isDirectoryEmptyOrMissing(dataPath)
@@ -209,7 +208,7 @@ extension ManagedAppActions {
                         operation: .reconnecting,
                         message: "Removing the local Data directory before connecting…"
                     )
-                    try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                    try await self.storageService.deletePrivilegedItem(at: dataPath)
                     localDataWillBeHidden = false
                 } else if localDataWillBeHidden {
                     self.setAppOperation(
@@ -220,9 +219,11 @@ extension ManagedAppActions {
                 }
                 try self.ensureLocalDataDirectory(for: bundleID)
                 mountAttempted = true
-                try await self.runPrivileged {
-                    try $0.mountAPFS(byDevice: device, at: dataPath, options: ["noowners", "nobrowse"])
-                }
+                try await self.storageService.mountAPFSVolume(
+                    device: device,
+                    at: dataPath,
+                    options: ["noowners", "nobrowse"]
+                )
                 self.updateMountPoint(for: device, to: dataPath.path)
                 self.clearAppError(bundleID: bundleID, after: "connect")
                 self.markAppManaged(bundleID: bundleID)
@@ -260,69 +261,24 @@ extension ManagedAppActions {
         }
     }
 
-    func requestRestore() {
-        guard !operation.isRunning else { return }
-        guard validateMigrationInputs() else { return }
-        activeDialog = .confirmRestore
-    }
-
-    func restore(overwriteLocalData: Bool = false) {
-        guard validateMigrationInputs(),
-              let bundleID = bundleIdentifier,
-              let appName = applicationName,
-              let sourceID = selectedContainerID else { return }
-        enqueueMigrationRequests([PendingMigration(
-            batchID: UUID(),
-            bundleIdentifier: bundleID,
-            appName: appName,
-            source: .container(sourceID),
-            target: .local,
-            content: .data,
-            overwriteExisting: overwriteLocalData
-        )])
-    }
-
     func ensureLocalDataDirectory(for bundleID: String) throws {
         let dataPath = localDataPath(for: bundleID)
-        switch storageService.itemKind(at: dataPath) {
+        switch FileSystemUtilities.itemKind(at: dataPath) {
         case .directory:
             return
         case .file:
-                throw operationError("The App Data path exists but is not a directory: \(dataPath.path)")
+            throw operationError("The App Data path exists but is not a directory: \(dataPath.path)")
         case .missing:
             break
         }
         do {
-            try storageService.createDirectory(at: dataPath, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: dataPath,
+                withIntermediateDirectories: true
+            )
         } catch {
             throw operationError("Could not create \(bundleID)/Data: \(error.localizedDescription)")
         }
-    }
-
-    func resolveVolume(for bundleID: String) throws -> (device: String, mountPoint: String?) {
-        guard let selected = containers.first(where: { $0.id == selectedContainerID }) else {
-            throw NSError(domain: "Restore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Select the SSD containing the migrated volume."])
-        }
-        guard let info = model.appInfo(for: bundleID) else {
-            throw NSError(domain: "Restore", code: 3, userInfo: [NSLocalizedDescriptionKey: "No AppInfo record exists for \(bundleID)."])
-        }
-        guard model.appInfoContainerID(for: bundleID) == selected.id else {
-            throw NSError(domain: "Restore", code: 2, userInfo: [NSLocalizedDescriptionKey: "Select the ExStorage container recorded by AppInfo."])
-        }
-        if let match = selected.volumes.first(where: {
-            $0.volumeUUID?.caseInsensitiveCompare(info.dataVolumeUUID) == .orderedSame
-        }), let device = match.bsdDevice {
-            return (device, match.mountPoint)
-        }
-        throw NSError(domain: "Restore", code: 3, userInfo: [NSLocalizedDescriptionKey: "The Data Volume recorded by AppInfo is not currently available."])
-    }
-
-    func runPrivileged<T: Sendable>(
-        _ operation: @escaping @Sendable (any StorageServicing) throws -> T
-    ) async throws -> T {
-        try await Task.detached(priority: .userInitiated) {
-            try operation(self.storageService)
-        }.value
     }
 
 }

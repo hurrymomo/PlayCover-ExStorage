@@ -1,11 +1,6 @@
 import DiskArbitration
 import Foundation
 
-nonisolated enum StorageDeviceChange: Sendable {
-    case inserted(device: String)
-    case removed(device: String)
-}
-
 /// Watches physical external disks rather than volume mount state. Existing
 /// devices establish a baseline after the startup scan; only later arrivals
 /// and removals are delivered to the application.

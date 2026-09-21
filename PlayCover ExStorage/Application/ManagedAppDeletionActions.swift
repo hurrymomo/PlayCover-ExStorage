@@ -68,9 +68,7 @@ extension ManagedAppActions {
             guard let self else { return }
             do {
                 if includingData {
-                    let identity = await Task.detached(priority: .userInitiated) {
-                        DiskUtilDiscovery.volumeIdentity(for: target.device)
-                    }.value
+                    let identity = await self.storageService.volumeIdentity(for: target.device)
                     guard identity?.volumeUUID == target.volumeUUID,
                           identity?.containerReference == target.containerReference else {
                         throw self.operationError("Refusing to delete external Data because its storage identity changed.")
@@ -148,8 +146,8 @@ extension ManagedAppActions {
                     applicationURL,
                     using: self.storageService
                 )
-                if includingData, self.storageService.itemExists(at: dataPath) {
-                    try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                if includingData, FileSystemUtilities.itemExists(at: dataPath) {
+                    try await self.storageService.deletePrivilegedItem(at: dataPath)
                 }
                 self.model.removeApp(bundleIdentifier: app.bundleIdentifier)
                 self.persistManagedApps()
@@ -186,8 +184,8 @@ extension ManagedAppActions {
         Task { [weak self] in
             guard let self else { return }
             do {
-                if self.storageService.itemExists(at: dataPath) {
-                    try await self.runPrivileged { try $0.deleteItem(at: dataPath) }
+                if FileSystemUtilities.itemExists(at: dataPath) {
+                    try await self.storageService.deletePrivilegedItem(at: dataPath)
                 }
                 self.operation = .idle
                 self.operationMessage = "Deleted \(app.name) data. The App was kept."
@@ -273,7 +271,7 @@ extension ManagedAppActions {
     }
 
     func isDirectoryEmptyOrMissing(_ url: URL) -> Bool {
-        storageService.directoryIsEmptyOrMissing(at: url)
+        FileSystemUtilities.directoryIsEmptyOrMissing(at: url)
     }
 
     func operationError(_ message: String) -> NSError {

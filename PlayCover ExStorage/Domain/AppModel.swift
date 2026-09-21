@@ -70,6 +70,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Applies a capacity query without replacing newer volume information or
+    /// recreating a container removed while the query was in flight.
+    func updateContainerFreeCapacity(
+        _ bytes: Int64,
+        for id: UUID,
+        expectedContainerReference: String
+    ) {
+        guard bytes >= 0,
+              let container = containersByID[id],
+              container.containerReference == expectedContainerReference else { return }
+        containersByID[id] = ExternalAPFSContainer(
+            containerUUID: container.containerUUID,
+            containerReference: container.containerReference,
+            physicalStoreDeviceIdentifiers: container.physicalStoreDeviceIdentifiers,
+            displayName: container.displayName,
+            connectionType: container.connectionType,
+            capacityTotalBytes: container.capacityTotalBytes,
+            capacityFreeBytes: bytes,
+            volumes: container.volumes
+        )
+    }
+
     /// Invalidates only in-memory state for a detached physical device.
     /// Persistent app registry and on-disk AppInfo are intentionally untouched.
     @discardableResult

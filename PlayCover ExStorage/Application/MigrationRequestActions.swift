@@ -81,19 +81,21 @@ extension ManagedAppActions {
         )
         for request in requests where
             request.content == .appAndData || request.source != request.target {
-            do {
-                try migrationService.startMigration(request)
-                MigrationTrace.event(
-                    "queue.enqueued",
-                    bundleID: request.bundleIdentifier,
-                    details: "id=\(request.id) batch=\(request.batchID) source=\(request.source) target=\(request.target)"
-                )
-            } catch {
-                MigrationTrace.event(
-                    "queue.enqueue.rejected",
-                    bundleID: request.bundleIdentifier,
-                    details: "error=\(error.localizedDescription)"
-                )
+            MigrationTrace.$migrationID.withValue(request.id) {
+                do {
+                    try migrationService.startMigration(request)
+                    MigrationTrace.event(
+                        "queue.enqueued",
+                        bundleID: request.bundleIdentifier,
+                        details: "batch=\(request.batchID) source=\(request.source) target=\(request.target)"
+                    )
+                } catch {
+                    MigrationTrace.event(
+                        "queue.enqueue.rejected",
+                        bundleID: request.bundleIdentifier,
+                        details: "error=\(error.localizedDescription)"
+                    )
+                }
             }
         }
     }
@@ -230,30 +232,6 @@ extension ManagedAppActions {
                 localDataPath(for: pending.bundleIdentifier)
             )
         }
-    }
-
-    func validateMigrationInputs(updatesMigrationScheduler: Bool = true) -> Bool {
-        func fail(_ message: String) -> Bool {
-            if !updatesMigrationScheduler, let bundleID = bundleIdentifier {
-                setAppOperation(bundleID: bundleID, operation: .failed, message: message)
-            } else {
-                operation = .failed
-                operationMessage = message
-            }
-            return false
-        }
-        guard bundleIdentifier != nil, applicationName != nil else {
-            return fail("Drop a valid .app with a Bundle ID first.")
-        }
-        guard let _ = containers.first(where: { $0.id == selectedContainerID }) else {
-            return fail("Select an external APFS SSD first.")
-        }
-        guard let applicationURL,
-              storageService.itemExists(at: applicationURL) else {
-            return fail("Locate or install the matching app before changing its data location.")
-        }
-
-        return true
     }
 
 }

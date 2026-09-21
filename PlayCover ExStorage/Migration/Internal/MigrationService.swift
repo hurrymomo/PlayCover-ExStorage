@@ -64,7 +64,9 @@ final class MigrationService: MigrationServicing {
         self.storageService = storageService
         self.appStore = appStore
         self.metadataStore = ExStorageMetadataStore()
-        self.migrationStore = LocalMigrationStore(homeDirectory: storageService.homeDirectory)
+        self.migrationStore = LocalMigrationStore(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
         updateSleepPrevention()
     }
 
@@ -116,20 +118,22 @@ final class MigrationService: MigrationServicing {
             guard let record = records.first(where: {
                 $0.phase != .queued && $0.phase != .needsAttention
             }) else { return }
-            do {
-                try await resumeMigration(from: record)
-                MigrationTrace.event("migration.recovery.enqueued", bundleID: record.request.bundleIdentifier)
-            } catch MigrationServiceError.duplicate {
-                return
-            } catch {
-                try? migrationStore.markNeedsAttention(id: record.request.id, error: error.localizedDescription)
-                runtime.recordError(error.localizedDescription, for: record.request.bundleIdentifier)
-                model.setAppFailureMessage(error.localizedDescription, for: record.request.bundleIdentifier)
-                MigrationTrace.event(
-                    "migration.recovery.needs-attention",
-                    bundleID: record.request.bundleIdentifier,
-                    details: "error=\(error.localizedDescription)"
-                )
+            await MigrationTrace.$migrationID.withValue(record.request.id) {
+                do {
+                    try await resumeMigration(from: record)
+                    MigrationTrace.event("migration.recovery.enqueued", bundleID: record.request.bundleIdentifier)
+                } catch MigrationServiceError.duplicate {
+                    return
+                } catch {
+                    try? migrationStore.markNeedsAttention(id: record.request.id, error: error.localizedDescription)
+                    runtime.recordError(error.localizedDescription, for: record.request.bundleIdentifier)
+                    model.setAppFailureMessage(error.localizedDescription, for: record.request.bundleIdentifier)
+                    MigrationTrace.event(
+                        "migration.recovery.needs-attention",
+                        bundleID: record.request.bundleIdentifier,
+                        details: "error=\(error.localizedDescription)"
+                    )
+                }
             }
         } catch {
             MigrationTrace.event("migration.recovery.load.failed", details: error.localizedDescription)
@@ -225,7 +229,7 @@ final class MigrationService: MigrationServicing {
 
     private func isInstalled(_ app: AppSnapshot) -> Bool {
         guard !app.applicationPath.isEmpty,
-              storageService.itemExists(at: app.applicationURL),
+              FileSystemUtilities.itemExists(at: app.applicationURL),
               let bundle = Bundle(url: app.applicationURL) else { return false }
         return bundle.bundleIdentifier == app.bundleIdentifier
     }
@@ -237,8 +241,9 @@ final class MigrationService: MigrationServicing {
     private func committedAppInfo(for bundleID: String) -> ManagedApplicationInfo {
         let app = model.apps.first { $0.bundleIdentifier == bundleID }
         let appURL = app?.applicationURL
-            ?? storageService.homeDirectory.appendingPathComponent("Applications/Unknown.app")
-        let dataURL = storageService.homeDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Unknown.app")
+        let dataURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers", isDirectory: true)
             .appendingPathComponent(bundleID, isDirectory: true)
             .appendingPathComponent("Data", isDirectory: true)

@@ -1,61 +1,5 @@
 import SwiftUI
 
-// MARK: - Core Models
-nonisolated struct ExternalAPFSContainer: Identifiable, Hashable, Sendable {
-    let containerUUID: UUID
-    let containerReference: String
-    let physicalStoreDeviceIdentifiers: [String]
-    let displayName: String?
-    let connectionType: String?
-    let capacityTotalBytes: Int64?
-    let capacityFreeBytes: Int64?
-    let volumes: [ExternalVolume]
-
-    var id: UUID { containerUUID }
-
-    init(containerUUID: UUID, containerReference: String, physicalStoreDeviceIdentifiers: [String] = [], displayName: String?, connectionType: String? = nil, capacityTotalBytes: Int64?, capacityFreeBytes: Int64?, volumes: [ExternalVolume]) {
-        self.containerUUID = containerUUID
-        self.containerReference = containerReference
-        self.physicalStoreDeviceIdentifiers = physicalStoreDeviceIdentifiers
-        self.displayName = displayName
-        self.connectionType = connectionType
-        self.capacityTotalBytes = capacityTotalBytes
-        self.capacityFreeBytes = capacityFreeBytes
-        self.volumes = volumes
-    }
-}
-
-nonisolated struct ExternalVolume: Identifiable, Hashable, Sendable {
-    let name: String
-    let mountPoint: String?
-    let bsdDevice: String?
-    let volumeUUID: String?
-    let availableBytes: Int64?
-    let usedBytes: Int64?
-
-    var id: String { volumeUUID ?? bsdDevice ?? "\(name)-\(mountPoint ?? "unmounted")" }
-
-    init(name: String, mountPoint: String?, bsdDevice: String?, volumeUUID: String? = nil, availableBytes: Int64?, usedBytes: Int64?) {
-        self.name = name
-        self.mountPoint = mountPoint
-        self.bsdDevice = bsdDevice
-        self.volumeUUID = volumeUUID
-        self.availableBytes = availableBytes
-        self.usedBytes = usedBytes
-    }
-
-    func replacingMountPoint(_ newMountPoint: String?) -> ExternalVolume {
-        ExternalVolume(
-            name: name,
-            mountPoint: newMountPoint,
-            bsdDevice: bsdDevice,
-            volumeUUID: volumeUUID,
-            availableBytes: availableBytes,
-            usedBytes: usedBytes
-        )
-    }
-}
-
 enum VolumeConnectionState {
     case unrelated
     case disconnected
@@ -90,16 +34,10 @@ func connectionState(for volume: ExternalVolume, bundleID: String?) -> VolumeCon
     return actualMountPath == expectedDataPath ? .connected : .disconnected
 }
 
-struct CreatedAPFSVolume {
-    let bsdDevice: String
-    let mountPoint: URL?
-}
-
 enum AppOperation {
     case idle
     case migrating
     case reconnecting
-    case restoring
     case succeeded
     case failed
 
@@ -108,7 +46,6 @@ enum AppOperation {
         case .idle: "Ready"
         case .migrating: "Migrating App Data"
         case .reconnecting: "Reconnecting App Data"
-        case .restoring: "Restoring Local Data"
         case .succeeded: "Operation Complete"
         case .failed: "Operation Failed"
         }
@@ -119,7 +56,6 @@ enum AppOperation {
         case .idle: "circle.dashed"
         case .migrating: "externaldrive.badge.plus"
         case .reconnecting: "link"
-        case .restoring: "arrow.uturn.backward.circle"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         }
@@ -127,7 +63,7 @@ enum AppOperation {
 
     var isRunning: Bool {
         switch self {
-        case .migrating, .reconnecting, .restoring: true
+        case .migrating, .reconnecting: true
         default: false
         }
     }
@@ -140,7 +76,6 @@ struct AppOperationState: Equatable {
 }
 
 enum AppDialog: Identifiable {
-    case confirmRestore
     case localDataMountFailed(error: String)
     case confirmMigrationOverwrite(PendingMigration, appToAdd: AppSnapshot?)
     case confirmMigrationBatch(MigrationBatchRequest)
@@ -148,7 +83,6 @@ enum AppDialog: Identifiable {
 
     var id: String {
         switch self {
-        case .confirmRestore: "confirmRestore"
         case .localDataMountFailed: "localDataMountFailed"
         case let .confirmMigrationOverwrite(pending, _): "confirmMigrationOverwrite-\(pending.id)"
         case let .confirmMigrationBatch(request): "confirmMigrationBatch-\(request.apps.map(\.bundleIdentifier).joined(separator: ","))"

@@ -17,15 +17,26 @@ extension ManagedAppActions {
         refreshInProgress = true
         Task {
             let found = containersToSynchronize ?? self.containers
-            for container in found where !container.volumes.contains(where: {
-                $0.name == ExStorageLayout.managementVolumeName
-            }) {
+            let localContainerNames = self.localContainerDirectoryNames()
+            for container in found {
+                let hasManagementVolume = container.volumes.contains(where: {
+                    $0.name == ExStorageLayout.managementVolumeName
+                })
+                let hasVolumeMatchingLocalContainer = container.volumes.contains {
+                    $0.name != ExStorageLayout.managementVolumeName
+                        && localContainerNames.contains($0.name)
+                }
+                guard hasManagementVolume || hasVolumeMatchingLocalContainer else {
+                    continue
+                }
                 do {
                     let management = try await self.migrationStorage.prepareManagementVolume(for: container)
-                    await self.rebuildAppInfo(in: container, at: management.root)
+                    if !hasManagementVolume {
+                        await self.rebuildAppInfo(in: container, at: management.root)
+                    }
                 } catch {
                     MigrationTrace.event(
-                        "management-volume.create.failed",
+                        "management-volume.prepare.failed",
                         details: "container=\(container.id) error=\(error.localizedDescription)"
                     )
                 }
@@ -52,14 +63,19 @@ extension ManagedAppActions {
         }
     }
 
-    /// Used after filesystem-changing operations and storage notifications.
-    /// Updating AppModel's storage revision causes ManagedAppListView to run
-    /// the managed-app reconciliation phase.
-    func rescanExternalStorage() {
-        Task {
-            let snapshot = await storageService.scanSnapshot()
-            model.replaceStorage(with: snapshot)
+    private func localContainerDirectoryNames() -> Set<String> {
+        let fileManager = FileManager.default
+        let root = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers", isDirectory: true)
+        guard let names = try? fileManager.contentsOfDirectory(atPath: root.path) else {
+            return []
         }
+        return Set(names.filter { name in
+            var isDirectory: ObjCBool = false
+            let path = root.appendingPathComponent(name, isDirectory: true).path
+            return fileManager.fileExists(atPath: path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        })
     }
 
     func localDataPath(for bundleID: String) -> URL {
@@ -75,16 +91,8 @@ extension ManagedAppActions {
                 $0.name == ExStorageLayout.managementVolumeName
             }
             guard alreadyManaged else { continue }
-            var management: ManagementVolumeContext?
-            do {
-                management = try await migrationStorage.prepareManagementVolume(for: container)
-                guard let management else { continue }
-                try await metadataStore.deleteAppInfo(bundleID: bundleID, at: management.root)
-                try await migrationStorage.releaseManagementVolumeIfNeeded(management)
-            } catch {
-                if let management { try? await migrationStorage.releaseManagementVolumeIfNeeded(management) }
-                throw error
-            }
+            let management = try await migrationStorage.prepareManagementVolume(for: container)
+            try await metadataStore.deleteAppInfo(bundleID: bundleID, at: management.root)
         }
         model.clearAppInfo(for: bundleID)
     }
@@ -94,10 +102,8 @@ extension ManagedAppActions {
         var loadedContainers: [String: UUID] = [:]
         for container in discoveredContainers.sorted(by: { $0.containerReference < $1.containerReference })
             where container.volumes.contains(where: { $0.name == ExStorageLayout.managementVolumeName }) {
-            var management: ManagementVolumeContext?
             do {
-                management = try await migrationStorage.prepareManagementVolume(for: container)
-                guard let management else { continue }
+                let management = try await migrationStorage.prepareManagementVolume(for: container)
                 for storedInfo in try await metadataStore.loadAllAppInfo(at: management.root) {
                     let dataVolumeUUID = storedInfo.dataVolumeUUID
                     guard let dataVolume = container.volumes.first(where: {
@@ -128,13 +134,11 @@ extension ManagedAppActions {
                     loadedInfo[storedInfo.bundleID] = storedInfo
                     loadedContainers[storedInfo.bundleID] = container.id
                 }
-                try await migrationStorage.releaseManagementVolumeIfNeeded(management)
             } catch {
                 MigrationTrace.event(
                     "management-metadata.load.failed",
                     details: "container=\(container.id) error=\(error.localizedDescription)"
                 )
-                if let management { try? await migrationStorage.releaseManagementVolumeIfNeeded(management) }
             }
         }
         for (bundleID, info) in loadedInfo {
@@ -176,7 +180,7 @@ extension ManagedAppActions {
         candidates.append(contentsOf: NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID))
         return candidates.first { url in
             url.pathExtension.caseInsensitiveCompare("app") == .orderedSame
-                && storageService.itemKind(at: url) == .directory
+                && FileSystemUtilities.itemKind(at: url) == .directory
                 && Bundle(url: url)?.bundleIdentifier == bundleID
         }
     }

@@ -11,13 +11,6 @@ struct AppDialogsModifier: ViewModifier {
         content
             .alert(item: activeDialog) { dialog in
                 switch dialog {
-                case .confirmRestore:
-                    Alert(
-                        title: Text("Restore Local App Data?"),
-                        message: Text("This copies and verifies the latest external data locally, switches the app back to local Data, and only then removes the external APFS Volume."),
-                        primaryButton: .destructive(Text("Restore")) { actions.restore() },
-                        secondaryButton: .cancel()
-                    )
                 case let .localDataMountFailed(error):
                     Alert(
                         title: Text("App Data Mount Failed"),

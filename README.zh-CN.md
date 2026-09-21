@@ -15,15 +15,13 @@ PlayCover ExStorage 是一款 macOS 工具，用于在本地存储和外置 APFS
 
 应用只接受外置 APFS container。内部磁盘和不支持的文件系统会被 privileged helper 拒绝。
 
-## 1.2.0 更新内容
+## 1.2.1 更新内容
 
-- 支持单独迁移 App、单独迁移 Data，以及同时迁移 App 和 Data；支持本地与外置 container 之间以及两个外置 container 之间直接迁移。
-- 新增串行迁移队列、持久化检查点、复制校验、中断恢复，以及 App & Data 事务回滚。
-- 每个 APFS container 使用一个 `ExStorage` 管理 Volume 保存 App 和 AppInfo，并使用 UUID 定位每个 App 的独立 Data Volume。
-- App 操作状态按 Bundle ID 独立保存，连接或断开其他 App 不会覆盖正在迁移 App 的状态和进度。
-- 新增 **Connect & Open**、本地 Data 冲突处理，以及打开未被管理的其他 Volume。
-- 改进删除选项、迁移校验、状态显示和临时挂载清理。
-- 加入经过签名验证的 Sparkle 更新支持，用于 1.2.0 之后的版本。
+- 迁移容量检查现在只查询所选目标 APFS container，其他磁盘上的重复 UUID 记录不再影响迁移。
+- 最新的目标可用容量会立即更新到 App 中。
+- 如果外置 container 中没有名称与本地 App container 匹配的 Volume，将不再自动创建 `ExStorage` 管理 Volume。
+- 新增相互关联的 workflow 与 privileged Helper 日志，包括受限轮换、迁移/会话/操作 ID，以及为 Issue 排查保留的容量查询响应。
+- 改进耗时 privileged 磁盘命令和 XPC 连接失败时的处理。
 
 ## 下载测试版本
 
@@ -95,6 +93,12 @@ AppInfo 保存 Bundle ID、Data Volume UUID、schema 版本和最后一次验证
 ```text
 ~/Library/Logs/PlayCover ExStorage/
 ```
+
+遇到问题后，可在应用菜单中选择 **Show Logs in Finder**，压缩整个日志文件夹并附在 Issue 中。
+`workflow.log` 记录应用/系统版本、应用流程事件和非特权复制诊断，`helper.log` 记录特权操作。两个日志都在超过约 8 MB 时轮换并保留一份历史文件，因此每种日志最多有两个文件。两个日志通过相同的 `operation` UUID 对应每次 Helper 调用及其在 `workflow.log` 中的开始/结果事件。
+每条应用日志都包含一次启动周期内固定的 `session` UUID。迁移执行期间的日志还会包含可持久恢复的 `migration` UUID；并发迁移通过 Swift task-local 上下文分别保存自己的 ID。
+`CapacityQueries/` 保留最近十次目标 APFS 容器容量查询的原始 plist；返回值会在解析前保存，方便检查重复记录或身份不匹配。
+日志可能包含本地路径、卷名称和磁盘 UUID，分享前可以检查内容。若应用崩溃，请同时附上 macOS 生成的本应用崩溃报告。
 
 ## 从源码构建
 

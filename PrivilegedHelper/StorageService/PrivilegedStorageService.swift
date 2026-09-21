@@ -9,6 +9,11 @@ private struct CommandResult {
     let output: String
 }
 
+private struct HelperOperationContext {
+    let operationID: String
+    let logPath: String
+}
+
 private final class PipeCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var storedData = Data()
@@ -36,7 +41,8 @@ private enum HelperFailure {
 final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
     private let fileManager = FileManager.default
     private let logLock = NSLock()
-    private var operationLogHandle: FileHandle?
+    private let maximumLogSize: Int64 = 8_000_000
+    private let retainedLogHistoryCount = 1
     private let devicePattern = try! NSRegularExpression(pattern: #"^disk[0-9]+s[0-9]+$"#)
     private let containerPattern = try! NSRegularExpression(pattern: #"^disk[0-9]+$"#)
     private let bundleIDPattern = try! NSRegularExpression(pattern: #"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$"#)
@@ -45,79 +51,60 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
     )
     private let volumePathPattern = try! NSRegularExpression(pattern: #"^/Volumes/[^/]+$"#)
     private let logPathPattern = try! NSRegularExpression(
-        pattern: #"^/Users/[^/]+/Library/Logs/PlayCover ExStorage/(?:workflow|migrate|reconnect|restore|remove)\.log$"#
+        pattern: #"^/Users/[^/]+/Library/Logs/PlayCover ExStorage/helper\.log$"#
     )
 
-    func beginOperationLog(atPath: String, reply: @escaping (String?, NSError?) -> Void) {
-        do {
-            let standardized = URL(fileURLWithPath: atPath).standardizedFileURL.path
-            let range = NSRange(standardized.startIndex..., in: standardized)
-            guard logPathPattern.firstMatch(in: standardized, range: range) != nil else {
-                throw HelperFailure.error("Invalid operation log path.")
-            }
-            let descriptor = open(standardized, O_WRONLY | O_APPEND | O_NOFOLLOW)
-            guard descriptor >= 0 else {
-                throw HelperFailure.error("The operation log could not be opened safely: \(String(cString: strerror(errno)))")
-            }
-            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-            logLock.lock()
-            try? operationLogHandle?.close()
-            operationLogHandle = handle
-            logLock.unlock()
-            appendLog("Helper logging started (pid \(ProcessInfo.processInfo.processIdentifier)).")
-            reply("Logging helper commands to \(standardized).", nil)
-        } catch let error as NSError {
-            reply(nil, error)
-        }
-    }
-
-    func createAPFSVolume(containerReference: String, name: String, reply: @escaping (String?, String?, String?, NSError?) -> Void) {
-        appendLog("CALL createAPFSVolume(containerReference: \(containerReference), name: \(name))")
+    func createAPFSVolume(containerReference: String, name: String, operationID: String, logPath: String, reply: @escaping (String?, String?, String?, NSError?) -> Void) {
         var createdDevice: String?
         do {
+            let context = try operationContext(operationID: operationID, logPath: logPath)
+            appendLog("CALL createAPFSVolume(containerReference: \(containerReference), name: \(name))", context: context)
             try requireMatch(containerReference, pattern: containerPattern, description: "APFS container")
             try requireMatch(name, pattern: bundleIDPattern, description: "volume name")
-            try requireExternalAPFSContainer(identifier: containerReference)
+            try requireExternalAPFSContainer(identifier: containerReference, context: context)
 
-            let devicesBefore = try volumeDevices(in: containerReference)
-            _ = try run("/usr/sbin/diskutil", ["apfs", "addVolume", containerReference, "APFS", name, "-nomount"])
-            let newDevices = try volumeDevices(in: containerReference).subtracting(devicesBefore)
+            let devicesBefore = try volumeDevices(in: containerReference, context: context)
+            _ = try run("/usr/sbin/diskutil", ["apfs", "addVolume", containerReference, "APFS", name, "-nomount"], context: context)
+            let newDevices = try volumeDevices(in: containerReference, context: context).subtracting(devicesBefore)
             guard newDevices.count == 1, let device = newDevices.first else {
                 throw HelperFailure.error("The newly created APFS volume could not be identified safely.")
             }
             createdDevice = device
-            let info = try plist("/usr/sbin/diskutil", ["info", "-plist", device])
+            let info = try plist("/usr/sbin/diskutil", ["info", "-plist", device], context: context)
             guard (info["VolumeName"] as? String) == name else {
                 throw HelperFailure.error("The new APFS volume name could not be verified.")
             }
-            appendLog("SUCCESS Created unmounted APFS volume \(device).")
+            appendLog("SUCCESS Created unmounted APFS volume \(device).", context: context)
             reply(device, nil, "Created unmounted APFS volume \(device).", nil)
         } catch let error as NSError {
-            appendLog("ERROR \(error.localizedDescription)")
+            let context = try? operationContext(operationID: operationID, logPath: logPath)
+            if let context { appendLog("ERROR \(error.localizedDescription)", context: context) }
             if let createdDevice {
-                appendLog("ROLLBACK deleting newly created volume \(createdDevice)")
-                _ = try? run("/usr/sbin/diskutil", ["apfs", "deleteVolume", createdDevice])
+                if let context {
+                    appendLog("ROLLBACK deleting newly created volume \(createdDevice)", context: context)
+                    _ = try? run("/usr/sbin/diskutil", ["apfs", "deleteVolume", createdDevice], context: context)
+                }
             }
             reply(nil, nil, nil, error)
         }
     }
 
-    func deleteAPFSVolume(device: String, reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL deleteAPFSVolume(device: \(device))")
-        perform(reply) {
+    func deleteAPFSVolume(device: String, operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
+        perform(operationID: operationID, logPath: logPath, reply: reply) { context in
+            self.appendLog("CALL deleteAPFSVolume(device: \(device))", context: context)
             try self.requireMatch(device, pattern: self.devicePattern, description: "APFS volume device")
-            try self.requireExternalAPFSVolume(identifier: device)
-            _ = try self.run("/usr/sbin/diskutil", ["apfs", "deleteVolume", device])
+            try self.requireExternalAPFSVolume(identifier: device, context: context)
+            _ = try self.run("/usr/sbin/diskutil", ["apfs", "deleteVolume", device], context: context)
             return "Deleted APFS volume \(device)."
         }
     }
 
-    func mountAPFSVolume(device: String, atPath: String, options: [String], reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL mountAPFSVolume(device: \(device), atPath: \(atPath), options: \(options))")
-        perform(reply) {
+    func mountAPFSVolume(device: String, atPath: String, options: [String], operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
+        perform(operationID: operationID, logPath: logPath, reply: reply) { context in
+            self.appendLog("CALL mountAPFSVolume(device: \(device), atPath: \(atPath), options: \(options))", context: context)
             try self.requireMatch(device, pattern: self.devicePattern, description: "APFS volume device")
             try self.requireAllowedPath(atPath)
-            try self.requireExternalAPFSVolume(identifier: device)
+            try self.requireExternalAPFSVolume(identifier: device, context: context)
 
             if !self.fileManager.fileExists(atPath: atPath) {
                 try self.fileManager.createDirectory(atPath: atPath, withIntermediateDirectories: false)
@@ -128,26 +115,26 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
                 mountArguments.append("nobrowse")
             }
             mountArguments.append(contentsOf: ["-mountPoint", atPath, device])
-            _ = try self.run("/usr/sbin/diskutil", mountArguments)
+            _ = try self.run("/usr/sbin/diskutil", mountArguments, context: context)
             if options.contains("noowners") {
-                _ = try self.run("/usr/sbin/diskutil", ["disableOwnership", device])
+                _ = try self.run("/usr/sbin/diskutil", ["disableOwnership", device], context: context)
             }
             return "Mounted \(device) at \(atPath)."
         }
     }
 
-    func unmountVolume(atPath: String, reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL unmountVolume(atPath: \(atPath))")
-        perform(reply) {
+    func unmountVolume(atPath: String, operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
+        perform(operationID: operationID, logPath: logPath, reply: reply) { context in
+            self.appendLog("CALL unmountVolume(atPath: \(atPath))", context: context)
             try self.requireAllowedPath(atPath)
-            _ = try self.run("/usr/sbin/diskutil", ["unmount", atPath])
+            _ = try self.run("/usr/sbin/diskutil", ["unmount", atPath], context: context)
             return "Unmounted \(atPath)."
         }
     }
 
-    func renameItem(fromPath: String, toPath: String, reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL renameItem(fromPath: \(fromPath), toPath: \(toPath))")
-        perform(reply) {
+    func renameItem(fromPath: String, toPath: String, operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
+        perform(operationID: operationID, logPath: logPath, reply: reply) { context in
+            self.appendLog("CALL renameItem(fromPath: \(fromPath), toPath: \(toPath))", context: context)
             if self.isRecoveryPath(fromPath) {
                 try self.requireRecoveryDestination(fromPath: fromPath, toPath: toPath)
             } else {
@@ -161,15 +148,15 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             guard !self.fileManager.fileExists(atPath: toPath) else {
                 throw HelperFailure.error("Destination already exists: \(toPath)")
             }
-            self.appendLog("FILE MOVE \(fromPath) -> \(toPath)")
+            self.appendLog("FILE MOVE \(fromPath) -> \(toPath)", context: context)
             try self.fileManager.moveItem(atPath: fromPath, toPath: toPath)
             return "Renamed \(fromPath) to \(toPath)."
         }
     }
 
-    func deleteItem(atPath: String, reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL deleteItem(atPath: \(atPath))")
-        perform(reply) {
+    func deleteItem(atPath: String, operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
+        perform(operationID: operationID, logPath: logPath, reply: reply) { context in
+            self.appendLog("CALL deleteItem(atPath: \(atPath))", context: context)
             if self.isTemporaryMountPath(atPath) {
                 try self.requireSafeUnmountedTemporaryDirectory(atPath)
             } else if self.isRecoveryPath(atPath) {
@@ -180,31 +167,49 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             guard self.fileManager.fileExists(atPath: atPath) else {
                 throw HelperFailure.error("Item does not exist: \(atPath)")
             }
-            self.appendLog("FILE DELETE \(atPath)")
+            self.appendLog("FILE DELETE \(atPath)", context: context)
             try self.fileManager.removeItem(atPath: atPath)
             return "Deleted \(atPath)."
         }
     }
 
-    func shutdown(reply: @escaping (String?, NSError?) -> Void) {
-        appendLog("CALL shutdown()")
-        reply("Privileged helper is shutting down.", nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(EXIT_SUCCESS) }
-    }
-
-    private func perform(_ reply: @escaping (String?, NSError?) -> Void, operation: () throws -> String) {
+    func shutdown(operationID: String, logPath: String, reply: @escaping (String?, NSError?) -> Void) {
         do {
-            let message = try operation()
-            appendLog("SUCCESS \(message)")
-            reply(message, nil)
+            let context = try operationContext(operationID: operationID, logPath: logPath)
+            appendLog("CALL shutdown()", context: context)
+            reply("Privileged helper is shutting down.", nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(EXIT_SUCCESS) }
         } catch let error as NSError {
-            appendLog("ERROR \(error.localizedDescription)")
             reply(nil, error)
         }
     }
 
-    private func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 120) throws -> CommandResult {
-        appendLog("EXEC \(([executable] + arguments).map(shellQuoted).joined(separator: " "))")
+    private func perform(
+        operationID: String,
+        logPath: String,
+        reply: @escaping (String?, NSError?) -> Void,
+        operation: (HelperOperationContext) throws -> String
+    ) {
+        do {
+            let context = try operationContext(operationID: operationID, logPath: logPath)
+            let message = try operation(context)
+            appendLog("SUCCESS \(message)", context: context)
+            reply(message, nil)
+        } catch let error as NSError {
+            if let context = try? operationContext(operationID: operationID, logPath: logPath) {
+                appendLog("ERROR \(error.localizedDescription)", context: context)
+            }
+            reply(nil, error)
+        }
+    }
+
+    private func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval = 120,
+        context: HelperOperationContext
+    ) throws -> CommandResult {
+        appendLog("EXEC \(([executable] + arguments).map(shellQuoted).joined(separator: " "))", context: context)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -215,7 +220,7 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         do {
             try process.run()
         } catch {
-            appendLog("LAUNCH ERROR \(error.localizedDescription)")
+            appendLog("LAUNCH ERROR \(error.localizedDescription)", context: context)
             throw error
         }
 
@@ -239,16 +244,23 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         }
         if process.isRunning {
             process.terminate()
-            readers.wait()
-            appendLog("TIMEOUT after \(timeout) seconds")
+            let terminationDeadline = Date().addingTimeInterval(1)
+            while process.isRunning && Date() < terminationDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            _ = readers.wait(timeout: .now() + 1)
+            appendLog("TIMEOUT after \(timeout) seconds", context: context)
             throw HelperFailure.error("Command timed out: \(executable)", code: 2)
         }
         readers.wait()
         let stdout = String(data: stdoutCapture.load(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrCapture.load(), encoding: .utf8) ?? ""
-        appendLog("EXIT \(process.terminationStatus)")
-        appendCommandOutput(label: "STDOUT", value: stdout)
-        appendCommandOutput(label: "STDERR", value: stderr)
+        appendLog("EXIT \(process.terminationStatus)", context: context)
+        appendCommandOutput(label: "STDOUT", value: stdout, context: context)
+        appendCommandOutput(label: "STDERR", value: stderr, context: context)
         guard process.terminationStatus == 0 else {
             throw HelperFailure.error(stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Command failed with status \(process.terminationStatus)."
@@ -257,28 +269,76 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         return CommandResult(output: stdout)
     }
 
-    private func appendCommandOutput(label: String, value: String) {
+    private func appendCommandOutput(label: String, value: String, context: HelperOperationContext) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let limit = 32_000
         let content = trimmed.count > limit
             ? String(trimmed.prefix(limit)) + "\n… output truncated in log …"
             : trimmed
-        appendLog("\(label):\n\(content)")
+        appendLog("\(label):\n\(content)", context: context)
     }
 
-    private func appendLog(_ message: String) {
-        print("[PrivilegedHelper] \(message)")
+    private func operationContext(operationID: String, logPath: String) throws -> HelperOperationContext {
+        guard let id = UUID(uuidString: operationID) else {
+            throw HelperFailure.error("Invalid operation identifier.")
+        }
+        let standardized = URL(fileURLWithPath: logPath).standardizedFileURL.path
+        let range = NSRange(standardized.startIndex..., in: standardized)
+        guard logPathPattern.firstMatch(in: standardized, range: range) != nil else {
+            throw HelperFailure.error("Invalid helper log path.")
+        }
+        let descriptor = open(
+            standardized,
+            O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW,
+            mode_t(0o644)
+        )
+        guard descriptor >= 0 else {
+            throw HelperFailure.error(
+                "The helper log could not be opened safely: \(String(cString: strerror(errno)))"
+            )
+        }
+        close(descriptor)
+        return HelperOperationContext(operationID: id.uuidString, logPath: standardized)
+    }
+
+    private func appendLog(_ message: String, context: HelperOperationContext) {
+        let entry = "operation=\(context.operationID) \(message)"
+        print("[PrivilegedHelper] \(entry)")
         logLock.lock()
         defer { logLock.unlock() }
-        guard let operationLogHandle else { return }
+        rotateLogIfNeeded(atPath: context.logPath)
+        let descriptor = open(
+            context.logPath,
+            O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW,
+            mode_t(0o644)
+        )
+        guard descriptor >= 0 else { return }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
         let timestamp = ISO8601DateFormatter().string(from: Date())
-        let data = Data("[\(timestamp)] \(message)\n".utf8)
+        let data = Data("[\(timestamp)] \(entry)\n".utf8)
         do {
-            try operationLogHandle.write(contentsOf: data)
-            try operationLogHandle.synchronize()
+            try handle.write(contentsOf: data)
         } catch {
             return
+        }
+    }
+
+    private func rotateLogIfNeeded(atPath path: String) {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value > maximumLogSize else { return }
+        let url = URL(fileURLWithPath: path)
+        for index in stride(from: retainedLogHistoryCount, through: 1, by: -1) {
+            let destination = url.appendingPathExtension(String(index))
+            let source = index == 1 ? url : url.appendingPathExtension(String(index - 1))
+            if fileManager.fileExists(atPath: destination.path) {
+                try? fileManager.removeItem(at: destination)
+            }
+            if fileManager.fileExists(atPath: source.path) {
+                try? fileManager.moveItem(at: source, to: destination)
+            }
         }
     }
 
@@ -289,8 +349,12 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private func plist(_ executable: String, _ arguments: [String]) throws -> [String: Any] {
-        let result = try run(executable, arguments)
+    private func plist(
+        _ executable: String,
+        _ arguments: [String],
+        context: HelperOperationContext
+    ) throws -> [String: Any] {
+        let result = try run(executable, arguments, context: context)
         guard let data = result.output.data(using: .utf8),
               let value = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw HelperFailure.error("Could not parse disk information.")
@@ -298,8 +362,8 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         return value
     }
 
-    private func requireExternalAPFSContainer(identifier: String) throws {
-        let info = try plist("/usr/sbin/diskutil", ["info", "-plist", identifier])
+    private func requireExternalAPFSContainer(identifier: String, context: HelperOperationContext) throws {
+        let info = try plist("/usr/sbin/diskutil", ["info", "-plist", identifier], context: context)
         guard (info["Internal"] as? Bool) == false else {
             throw HelperFailure.error("Refusing to modify a disk that is not external.")
         }
@@ -311,7 +375,7 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
               !stores.isEmpty else {
             throw HelperFailure.error("The selected device is not an APFS container.")
         }
-        let root = try plist("/usr/sbin/diskutil", ["apfs", "list", "-plist", identifier])
+        let root = try plist("/usr/sbin/diskutil", ["apfs", "list", "-plist", identifier], context: context)
         guard let containers = root["Containers"] as? [[String: Any]],
               containers.contains(where: { ($0["ContainerReference"] as? String) == identifier }) else {
             throw HelperFailure.error("The selected APFS container could not be verified.")
@@ -320,7 +384,7 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             guard let physicalStore = store["APFSPhysicalStore"] as? String else {
                 throw HelperFailure.error("The APFS physical store could not be verified.")
             }
-            let storeInfo = try plist("/usr/sbin/diskutil", ["info", "-plist", physicalStore])
+            let storeInfo = try plist("/usr/sbin/diskutil", ["info", "-plist", physicalStore], context: context)
             guard (storeInfo["Internal"] as? Bool) == false,
                   !isDiskImage(storeInfo),
                   ((storeInfo["Content"] as? String)?.lowercased().contains("apfs") == true) else {
@@ -337,8 +401,8 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
             || (info["DiskImage"] as? Bool) == true
     }
 
-    private func requireExternalAPFSVolume(identifier: String) throws {
-        let info = try plist("/usr/sbin/diskutil", ["info", "-plist", identifier])
+    private func requireExternalAPFSVolume(identifier: String, context: HelperOperationContext) throws {
+        let info = try plist("/usr/sbin/diskutil", ["info", "-plist", identifier], context: context)
         guard (info["Internal"] as? Bool) == false else {
             throw HelperFailure.error("Refusing to modify a volume that is not external.")
         }
@@ -351,11 +415,11 @@ final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol {
         guard let container = info["APFSContainerReference"] as? String else {
             throw HelperFailure.error("The APFS volume container could not be verified.")
         }
-        try requireExternalAPFSContainer(identifier: container)
+        try requireExternalAPFSContainer(identifier: container, context: context)
     }
 
-    private func volumeDevices(in container: String) throws -> Set<String> {
-        let root = try plist("/usr/sbin/diskutil", ["apfs", "list", "-plist", container])
+    private func volumeDevices(in container: String, context: HelperOperationContext) throws -> Set<String> {
+        let root = try plist("/usr/sbin/diskutil", ["apfs", "list", "-plist", container], context: context)
         guard let containers = root["Containers"] as? [[String: Any]],
               let selected = containers.first(where: { ($0["ContainerReference"] as? String) == container }),
               let volumes = selected["Volumes"] as? [[String: Any]] else { return [] }

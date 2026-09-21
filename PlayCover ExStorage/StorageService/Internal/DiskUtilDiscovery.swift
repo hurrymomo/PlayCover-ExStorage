@@ -119,18 +119,35 @@ nonisolated struct DiskUtilDiscovery {
         (value as? NSNumber)?.int64Value
     }
 
-    static func containerFreeCapacitySnapshots() -> [UUID: Int64] {
-        guard let plist = runDiskutil(args: ["apfs", "list", "-plist"]),
-              let dictionary = try? PropertyListSerialization.propertyList(
-                from: plist, options: [], format: nil
-              ) as? [String: Any],
-              let containers = dictionary["Containers"] as? [[String: Any]] else { return [:] }
-        return Dictionary(uniqueKeysWithValues: containers.compactMap { container in
-            guard let uuidString = container["APFSContainerUUID"] as? String,
-                  let uuid = UUID(uuidString: uuidString),
-                  let freeBytes = byteCount(container["CapacityFree"]) else { return nil }
-            return (uuid, freeBytes)
-        })
+    static func containerFreeCapacity(for container: ExternalAPFSContainer) -> Int64? {
+        let queryID = UUID()
+        let context = "query=\(queryID) target=\(container.containerReference) expectedUUID=\(container.id)"
+        MigrationTrace.event("capacity.query.begin", details: context)
+        guard !container.containerReference.isEmpty,
+              let plist = runDiskutil(args: ["apfs", "list", "-plist", container.containerReference]) else {
+            MigrationTrace.event("capacity.query.failed", details: "\(context) reason=command-failed")
+            return nil
+        }
+
+        // Persist the exact response before parsing so a failure can be
+        // investigated without asking the user to reproduce their disk state.
+        let snapshot = MigrationTrace.saveCapacityQuery(plist, queryID: queryID)
+        MigrationTrace.event(
+            "capacity.query.captured",
+            details: "\(context) bytes=\(plist.count) snapshot=\(snapshot?.lastPathComponent ?? "unavailable")"
+        )
+        do {
+            let bytes = try APFSContainerCapacity.read(
+                from: plist,
+                containerReference: container.containerReference,
+                expectedUUID: container.id
+            )
+            MigrationTrace.event("capacity.query.completed", details: "\(context) freeBytes=\(bytes)")
+            return bytes
+        } catch {
+            MigrationTrace.event("capacity.query.failed", details: "\(context) reason=\(error)")
+            return nil
+        }
     }
 
     static func discoverExternalAPFSContainersProgressively(

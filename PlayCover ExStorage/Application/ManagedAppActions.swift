@@ -5,7 +5,6 @@ import Foundation
 // MARK: - Application workflow coordination
 @MainActor
 final class ManagedAppActions: ObservableObject {
-    static let lastAppPathKey = "LastDroppedApplicationPath"
     let model: AppModel
     let viewModel: AppViewModel
     let appStore: any ManagedAppPersisting
@@ -18,16 +17,6 @@ final class ManagedAppActions: ObservableObject {
     var containers: [ExternalAPFSContainer] {
         model.allContainers()
     }
-    var selectedContainerID: ExternalAPFSContainer.ID? {
-        get {
-            guard case let .container(id) = viewModel.sidebarSelection else { return nil }
-            return id
-        }
-        set {
-            viewModel.selectSidebar(newValue.map(StorageSidebarSelection.container) ?? .allApps)
-        }
-    }
-
     // The registry is the source of truth. Selection stores only a stable Bundle ID;
     // app metadata is derived from the selected registry record.
     var selectedAppBundleID: String? {
@@ -76,7 +65,7 @@ final class ManagedAppActions: ObservableObject {
     /// ordinary volume.
     func isInstalledApp(_ app: AppSnapshot) -> Bool {
         guard !app.applicationPath.isEmpty,
-              storageService.itemExists(at: app.applicationURL),
+              FileSystemUtilities.itemExists(at: app.applicationURL),
               let bundle = Bundle(url: app.applicationURL) else { return false }
         return bundle.bundleIdentifier == app.bundleIdentifier
     }
@@ -121,10 +110,6 @@ final class ManagedAppActions: ObservableObject {
 
     func managedDataContainer(for bundleID: String) -> ExternalAPFSContainer? {
         model.managedDataContainer(for: bundleID)
-    }
-
-    func hasExternalApp(bundleID: String) -> Bool {
-        managedAppContainer(for: bundleID) != nil
     }
 
     func managedAppContainer(for bundleID: String) -> ExternalAPFSContainer? {
@@ -179,7 +164,7 @@ final class ManagedAppActions: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let snapshot = await self.storageService.scanSnapshot()
+                let snapshot = await self.storageService.scanSnapshot(onPhysicalDevice: nil)
                 guard let current = snapshot.containers.flatMap(\.volumes).first(where: {
                     $0.bsdDevice == expectedDevice
                         && $0.volumeUUID?.caseInsensitiveCompare(expectedUUID) == .orderedSame
@@ -227,7 +212,7 @@ final class ManagedAppActions: ObservableObject {
         model: AppModel,
         viewModel: AppViewModel,
         appStore: (any ManagedAppPersisting)? = nil,
-        storageService: any StorageServicing = UserStorageService.shared,
+        storageService: any StorageServicing = StorageServiceFactory.live,
         migrationService: any MigrationServicing
     ) {
         self.model = model
@@ -252,7 +237,9 @@ final class ManagedAppActions: ObservableObject {
         switch change {
         case let .inserted(device):
             Task {
-                let inserted = await storageService.scanContainers(onPhysicalDevice: device)
+                let inserted = await storageService
+                    .scanSnapshot(onPhysicalDevice: device)
+                    .containers
                 guard !inserted.isEmpty else { return }
                 model.insertOrUpdateContainers(inserted)
                 synchronizeManagedAppsWithStorage(in: inserted)

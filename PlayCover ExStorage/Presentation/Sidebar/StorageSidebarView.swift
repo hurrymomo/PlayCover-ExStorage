@@ -141,7 +141,7 @@ struct StorageSidebarView: View {
 
     private func refreshExternalStorage() {
         Task {
-            let snapshot = await storageService.scanSnapshot()
+            let snapshot = await storageService.scanSnapshot(onPhysicalDevice: nil)
             model.replaceStorage(with: snapshot)
         }
     }

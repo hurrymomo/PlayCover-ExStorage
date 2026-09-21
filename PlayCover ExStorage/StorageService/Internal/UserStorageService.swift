@@ -5,45 +5,32 @@ import Foundation
 nonisolated final class UserStorageService: StorageServicing, @unchecked Sendable {
     static let shared = UserStorageService(privilegedClient: .shared)
 
-    private let fileManager: FileManager
     private let privilegedClient: XPCPrivilegedClient
     private let changeMonitor = StorageChangeMonitor()
 
-    init(
-        fileManager: FileManager = .default,
-        privilegedClient: XPCPrivilegedClient
-    ) {
-        self.fileManager = fileManager
+    init(privilegedClient: XPCPrivilegedClient) {
         self.privilegedClient = privilegedClient
         changeMonitor.start()
     }
 
-    var homeDirectory: URL { fileManager.homeDirectoryForCurrentUser }
-
-    func scanSnapshot() async -> StorageSnapshot {
-        let builder = await MainActor.run { StorageSnapshotBuilder() }
-        await DiskUtilDiscovery.discoverExternalAPFSContainersProgressively { container in
-            builder.add(container)
-        } onVolume: { containerID, volume in
-            builder.add(volume, to: containerID)
-        }
-        let discovered = await MainActor.run { builder.snapshot() }
-        let snapshot = await mountingManagementVolumes(in: discovered)
-        changeMonitor.establishBaseline(
-            devices: Set(snapshot.containers.flatMap(\.physicalStoreDeviceIdentifiers).map(Self.wholeDisk))
-        )
-        return snapshot
-    }
-
-    func scanContainers(onPhysicalDevice device: String) async -> [ExternalAPFSContainer] {
+    func scanSnapshot(onPhysicalDevice device: String?) async -> StorageSnapshot {
         let builder = await MainActor.run { StorageSnapshotBuilder() }
         await DiskUtilDiscovery.discoverExternalAPFSContainersProgressively(
             onPhysicalDevice: device,
             onContainer: { builder.add($0) },
             onVolume: { containerID, volume in builder.add(volume, to: containerID) }
         )
-        let discovered = await MainActor.run { builder.snapshot() }
-        return await mountingManagementVolumes(in: discovered).containers
+        let snapshot = await MainActor.run { builder.snapshot() }
+        if device == nil {
+            changeMonitor.establishBaseline(
+                devices: Set(
+                    snapshot.containers
+                        .flatMap(\.physicalStoreDeviceIdentifiers)
+                        .map(Self.wholeDisk)
+                )
+            )
+        }
+        return snapshot
     }
 
     func setStorageChangeHandler(
@@ -59,172 +46,134 @@ nonisolated final class UserStorageService: StorageServicing, @unchecked Sendabl
         return String(device[..<partition.lowerBound])
     }
 
-    /// Storage discovery guarantees that every discovered ExStorage management
-    /// volume is available at its stable UUID-based mount point. Mount failures
-    /// do not discard the container from the snapshot; later access retries the
-    /// same operation through ManagementVolumeAccess.
-    private func mountingManagementVolumes(in snapshot: StorageSnapshot) async -> StorageSnapshot {
-        var containersByID = snapshot.containersByID
-        for container in snapshot.containers {
-            var updatedVolumes = container.volumes
-            var changed = false
-            for index in updatedVolumes.indices {
-                let volume = updatedVolumes[index]
-                guard volume.name == ExStorageLayout.managementVolumeName,
-                      volume.mountPoint?.isEmpty != false,
-                      let device = volume.bsdDevice,
-                      let volumeUUID = volume.volumeUUID else { continue }
-                let mountPoint = Self.managementVolumeMountPoint(volumeUUID: volumeUUID)
-                do {
-                    try await mountAPFSVolume(
-                        device: device,
-                        at: mountPoint,
-                        options: ["noowners", "nobrowse"]
-                    )
-                    updatedVolumes[index] = volume.replacingMountPoint(mountPoint.path)
-                    changed = true
-                    MigrationTrace.event(
-                        "management-volume.scan-mounted",
-                        details: "container=\(container.id) volume=\(volumeUUID) path=\(mountPoint.path)"
-                    )
-                } catch {
-                    MigrationTrace.event(
-                        "management-volume.scan-mount-failed",
-                        details: "container=\(container.id) volume=\(volumeUUID) error=\(error.localizedDescription)"
-                    )
-                }
+    func volumeIdentity(for device: String) async -> StorageVolumeIdentity? {
+        let migrationID = MigrationTrace.migrationID
+        return await Task.detached(priority: .userInitiated) {
+            MigrationTrace.$migrationID.withValue(migrationID) {
+                guard let identity = DiskUtilDiscovery.volumeIdentity(for: device),
+                      let containerReference = identity.containerReference else { return nil }
+                return StorageVolumeIdentity(
+                    volumeUUID: identity.volumeUUID,
+                    containerReference: containerReference,
+                    mountPoint: identity.mountPoint
+                )
             }
-            guard changed else { continue }
-            containersByID[container.id] = ExternalAPFSContainer(
-                containerUUID: container.containerUUID,
-                containerReference: container.containerReference,
-                physicalStoreDeviceIdentifiers: container.physicalStoreDeviceIdentifiers,
-                displayName: container.displayName,
-                connectionType: container.connectionType,
-                capacityTotalBytes: container.capacityTotalBytes,
-                capacityFreeBytes: container.capacityFreeBytes,
-                volumes: updatedVolumes
-            )
-        }
-        return StorageSnapshot(containersByID: containersByID, capturedAt: snapshot.capturedAt)
+        }.value
     }
 
-    private static func managementVolumeMountPoint(volumeUUID: String) -> URL {
-        let stableID = volumeUUID.uppercased().filter {
-            $0.isLetter || $0.isNumber || $0 == "-"
-        }
-        return URL(fileURLWithPath: "/Volumes/ExStorage-\(stableID)", isDirectory: true)
-    }
-
-    func itemExists(at url: URL) -> Bool {
-        fileManager.fileExists(atPath: url.path)
-    }
-
-    func itemKind(at url: URL) -> StorageItemKind {
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            return .missing
-        }
-        return isDirectory.boolValue ? .directory : .file
-    }
-
-    func directoryIsEmptyOrMissing(at url: URL) -> Bool {
-        guard itemExists(at: url) else { return true }
-        return (try? fileManager.contentsOfDirectory(atPath: url.path).isEmpty) ?? false
-    }
-
-    func createDirectory(at url: URL, withIntermediateDirectories: Bool = true) throws {
-        try fileManager.createDirectory(
-            at: url,
-            withIntermediateDirectories: withIntermediateDirectories
-        )
-    }
-
-    func moveItem(from source: URL, to destination: URL) throws {
-        try fileManager.moveItem(at: source, to: destination)
-    }
-
-    func removeItem(at url: URL) throws {
-        try fileManager.removeItem(at: url)
-    }
-
-    func allocatedSize(of root: URL) throws -> Int64 {
-        try StorageFileSystem.allocatedSize(of: root, fileManager: fileManager)
-    }
-
-    func beginPrivilegedOperationLog(at url: URL) async throws {
-        try await privileged { try $0.beginOperationLog(at: url) }
-    }
-
-    func ensurePrivilegedHelperAvailable() async throws {
-        try await privileged { try $0.ensureHelperAvailable() }
+    func availableCapacity(for container: ExternalAPFSContainer) async -> Int64? {
+        let migrationID = MigrationTrace.migrationID
+        return await Task.detached(priority: .utility) {
+            MigrationTrace.$migrationID.withValue(migrationID) {
+                DiskUtilDiscovery.containerFreeCapacity(for: container)
+            }
+        }.value
     }
 
     func createAPFSVolume(containerReference: String, name: String) async throws -> CreatedAPFSVolume {
-        try await privileged { try $0.createAPFSVolume(containerRef: containerReference, name: name) }
+        try await privileged(action: "create-volume") { client, operationID in
+            try client.createAPFSVolume(
+                containerRef: containerReference,
+                name: name,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func mountAPFSVolume(device: String, at mountPoint: URL, options: [String]) async throws {
-        try await privileged { try $0.mountAPFS(byDevice: device, at: mountPoint, options: options) }
+        try await privileged(action: "mount-volume") { client, operationID in
+            try client.mountAPFS(
+                byDevice: device,
+                at: mountPoint,
+                options: options,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func unmountVolume(at mountPoint: URL) async throws {
-        try await privileged { try $0.unmount(byMountPoint: mountPoint) }
+        try await privileged(action: "unmount-volume") { client, operationID in
+            try client.unmount(
+                byMountPoint: mountPoint,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func deleteAPFSVolume(device: String) async throws {
-        try await privileged { try $0.deleteAPFSVolume(byDevice: device) }
+        try await privileged(action: "delete-volume") { client, operationID in
+            try client.deleteAPFSVolume(
+                byDevice: device,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func movePrivilegedItem(from source: URL, to destination: URL) async throws {
-        try await privileged { try $0.renameItem(from: source, to: destination) }
+        try await privileged(action: "move-item") { client, operationID in
+            try client.renameItem(
+                from: source,
+                to: destination,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func deletePrivilegedItem(at url: URL) async throws {
-        try await privileged { try $0.deleteItem(at: url) }
+        try await privileged(action: "delete-item") { client, operationID in
+            try client.deleteItem(
+                at: url,
+                operationID: operationID,
+                logURL: MigrationTrace.helperLogURL
+            )
+        }
     }
 
     func shutdownPrivilegedHelper() {
-        privilegedClient.shutdownHelper()
-    }
-
-    func beginOperationLog(at url: URL) throws {
-        try privilegedClient.beginOperationLog(at: url)
-    }
-
-    func ensureHelperAvailable() throws {
-        try privilegedClient.ensureHelperAvailable()
-    }
-
-    func createAPFSVolume(containerRef: String, name: String) throws -> CreatedAPFSVolume {
-        try privilegedClient.createAPFSVolume(containerRef: containerRef, name: name)
-    }
-
-    func mountAPFS(byDevice device: String, at mountPoint: URL, options: [String]) throws {
-        try privilegedClient.mountAPFS(byDevice: device, at: mountPoint, options: options)
-    }
-
-    func unmount(byMountPoint mountPoint: URL) throws {
-        try privilegedClient.unmount(byMountPoint: mountPoint)
-    }
-
-    func deleteAPFSVolume(byDevice device: String) throws {
-        try privilegedClient.deleteAPFSVolume(byDevice: device)
-    }
-
-    func renameItem(from source: URL, to destination: URL) throws {
-        try privilegedClient.renameItem(from: source, to: destination)
-    }
-
-    func deleteItem(at url: URL) throws {
-        try privilegedClient.deleteItem(at: url)
+        let operationID = UUID().uuidString
+        MigrationTrace.event(
+            "helper.call.begin",
+            details: "operation=\(operationID) action=shutdown"
+        )
+        privilegedClient.shutdownHelper(operationID: operationID, logURL: MigrationTrace.helperLogURL)
+        MigrationTrace.event(
+            "helper.call.completed",
+            details: "operation=\(operationID) action=shutdown"
+        )
     }
 
     private func privileged<T: Sendable>(
-        _ operation: @escaping @Sendable (XPCPrivilegedClient) throws -> T
+        action: String,
+        _ operation: @escaping @Sendable (XPCPrivilegedClient, String) throws -> T
     ) async throws -> T {
-        try await Task.detached(priority: .userInitiated) {
-            try operation(self.privilegedClient)
-        }.value
+        let operationID = UUID().uuidString
+        MigrationTrace.event(
+            "helper.call.begin",
+            details: "operation=\(operationID) action=\(action)"
+        )
+        let migrationID = MigrationTrace.migrationID
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try MigrationTrace.$migrationID.withValue(migrationID) {
+                    try operation(self.privilegedClient, operationID)
+                }
+            }.value
+            MigrationTrace.event(
+                "helper.call.succeeded",
+                details: "operation=\(operationID) action=\(action)"
+            )
+            return result
+        } catch {
+            MigrationTrace.event(
+                "helper.call.failed",
+                details: "operation=\(operationID) action=\(action) error=\(error.localizedDescription)"
+            )
+            throw error
+        }
     }
 }

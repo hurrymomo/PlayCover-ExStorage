@@ -10,16 +10,12 @@ enum ManagedAppDeletion {
         expectedContainerReference: String,
         using storage: any StorageServicing
     ) async throws {
-        let identity = await Task.detached(priority: .userInitiated) {
-            DiskUtilDiscovery.volumeIdentity(for: device)
-        }.value
+        let identity = await storage.volumeIdentity(for: device)
         guard identity?.volumeUUID == expectedUUID,
               identity?.containerReference == expectedContainerReference else {
             throw error("Refusing to delete a Volume whose UUID or APFS Container changed.")
         }
-        try await Task.detached(priority: .userInitiated) {
-            try storage.deleteAPFSVolume(byDevice: device)
-        }.value
+        try await storage.deleteAPFSVolume(device: device)
     }
 
     static func moveApplicationToTrash(
@@ -29,7 +25,7 @@ enum ManagedAppDeletion {
         guard applicationURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame else {
             throw error("Refusing to trash a path that is not an App bundle.")
         }
-        guard storage.itemExists(at: applicationURL) else {
+        guard FileSystemUtilities.itemExists(at: applicationURL) else {
             throw error("The App no longer exists at its recorded path.")
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in

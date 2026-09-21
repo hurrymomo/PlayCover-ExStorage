@@ -54,13 +54,6 @@ final class MigrationRuntimeState {
         publish()
     }
 
-    @discardableResult
-    func clearError(for bundleIdentifier: String) -> Bool {
-        guard errors.removeValue(forKey: bundleIdentifier) != nil else { return false }
-        publish()
-        return true
-    }
-
     func isLocked(bundleIdentifier: String) -> Bool {
         activeRequest?.bundleIdentifier == bundleIdentifier
             || queuedRequests.contains { $0.bundleIdentifier == bundleIdentifier }

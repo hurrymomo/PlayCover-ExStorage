@@ -78,7 +78,7 @@ struct ContentView_Previews: PreviewProvider {
         let viewModel = AppViewModel()
         let model = AppModel()
         let appStore = ManagedAppStore()
-        let storageService = UserStorageService.shared
+        let storageService = StorageServiceFactory.live
         ContentView(
             model: model,
             viewModel: viewModel,

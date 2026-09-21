@@ -15,13 +15,10 @@ PlayCover ExStorage 是一款 macOS 工具，用于在本地存储和外置 APFS
 
 应用只接受外置 APFS container。内部磁盘和不支持的文件系统会被 privileged helper 拒绝。
 
-## 1.2.1 更新内容
+## 1.2.2 更新内容
 
-- 迁移容量检查现在只查询所选目标 APFS container，其他磁盘上的重复 UUID 记录不再影响迁移。
-- 最新的目标可用容量会立即更新到 App 中。
-- 如果外置 container 中没有名称与本地 App container 匹配的 Volume，将不再自动创建 `ExStorage` 管理 Volume。
-- 新增相互关联的 workflow 与 privileged Helper 日志，包括受限轮换、迁移/会话/操作 ID，以及为 Issue 排查保留的容量查询响应。
-- 改进耗时 privileged 磁盘命令和 XPC 连接失败时的处理。
+- 在 **Show Logs in Finder** 下新增 **Share Diagnostic Logs…**。用户明确确认隐私提示后，App 会打包受限保存的 workflow、privileged Helper 和近期容量查询日志，并准备一封已填写收件人且附带 ZIP 的邮件，供用户检查后发送。
+- 如果系统邮件分享不可用，App 会在 Finder 中显示诊断 ZIP，方便手动添加附件。
 
 ## 下载测试版本
 

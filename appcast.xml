@@ -3,12 +3,12 @@
     <channel>
         <title>PlayCover ExStorage</title>
         <item>
-            <title>1.2.1</title>
-            <pubDate>Sun, 20 Sep 2026 23:23:13 -0700</pubDate>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>1.2.1</sparkle:shortVersionString>
+            <title>1.2.2</title>
+            <pubDate>Mon, 21 Sep 2026 00:22:41 -0700</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.2.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/hurrymomo/PlayCover-ExStorage/releases/download/v1.2.1/PlayCover-ExStorage-1.2.1-test-unnotarized.dmg" length="7383651" type="application/octet-stream" sparkle:edSignature="965mjmwwagN4NMeudzDgxUb00wtgBaTlflcL4DkdMSiZzOSkY3WOCpBq2NXOupISsmJJx8R2X0Ij4hZ7yK8OBA=="/>
+            <enclosure url="https://github.com/hurrymomo/PlayCover-ExStorage/releases/download/v1.2.2/PlayCover-ExStorage-1.2.2-test-unnotarized.dmg" length="7408528" type="application/octet-stream" sparkle:edSignature="QDU/busIu8XfCCKvFFyXtOJ40vMGs0Oik5EUivVxWoF/leUOgDujPhKfp3X80TSSxQSvaSR8/dvKwJ1KQLNRBg=="/>
         </item>
     </channel>
 </rss>

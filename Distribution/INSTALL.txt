@@ -1,4 +1,4 @@
-PlayCover ExStorage 1.2.1 — Unnotarized Test Build
+PlayCover ExStorage 1.2.2 — Unnotarized Test Build
 
 This build is signed with an Apple Development certificate but is not notarized by Apple.
 

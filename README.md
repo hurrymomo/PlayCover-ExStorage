@@ -15,13 +15,10 @@ PlayCover ExStorage is a macOS utility for moving PlayCover Apps and their conta
 
 Only external APFS containers are accepted. Internal disks and unsupported filesystems are rejected by the privileged helper.
 
-## What's new in 1.2.1
+## What's new in 1.2.2
 
-- Migration capacity checks now query only the selected target APFS container, so unrelated duplicate UUID records no longer interfere with migration.
-- Fresh target capacity results are reflected in the App immediately.
-- An `ExStorage` management Volume is no longer created automatically on an unrelated external container without a Volume matching a local App container.
-- Added correlated workflow and privileged Helper logs with bounded rotation, migration/session/operation identifiers, and retained capacity-query responses for issue diagnosis.
-- Improved handling of slow privileged disk commands and XPC connection failures.
+- Added **Share Diagnostic Logs…** below **Show Logs in Finder**. After an explicit privacy confirmation, the App packages its bounded workflow, privileged Helper, and recent capacity-query logs, then prepares an addressed email with the ZIP attached for the user to review and send.
+- If email sharing is unavailable, the diagnostic ZIP is shown in Finder for manual attachment.
 
 ## Downloading the test build
 

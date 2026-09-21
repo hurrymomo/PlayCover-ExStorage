@@ -80,6 +80,9 @@ struct PlayCover_ExStorageApp: App {
                 Button("Show Logs in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([MigrationTrace.logURL])
                 }
+                Button("Share Diagnostic Logs…") {
+                    DiagnosticLogSharingController.shared.shareLogs()
+                }
             }
         }
     }
